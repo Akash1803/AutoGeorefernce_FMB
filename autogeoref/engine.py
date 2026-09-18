@@ -173,6 +173,7 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
         if s not in adjusted:
             continue
         theta, t = adjusted[s]["theta"], adjusted[s]["t"]
+        row["heading_deg"] = round(theta, 3)          # the adjusted heading, not the start guess
         mine = [v for k, v in residuals.items() if s in k]
         row["boundary_rms_m"] = round(min(v["rms"] for v in mine), 3) if mine else None
         partners = sorted({k[0] if k[1] == s else k[1] for k in residuals if s in k},
