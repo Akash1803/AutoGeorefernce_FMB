@@ -14,7 +14,7 @@ import shutil
 
 import numpy as np
 
-from . import anchors, engine, fit, paths, review, sheets
+from . import anchors, engine, fit, neighbours, paths, review, sheets
 
 REPORT_ONLY_RMS = 3.0
 
@@ -89,7 +89,9 @@ def leave_one_out(village, surveys=None, mode="full", keep_work=True):
             shutil.rmtree(work)
         (work / "FMB_Vector" / village).mkdir(parents=True)
         for f in src.iterdir():
-            if not f.is_file():
+            if f.is_dir():
+                if f.name in ("neighbour_transcription", "gcp"):
+                    shutil.copytree(f, work / "FMB_Vector" / village / f.name, dirs_exist_ok=True)
                 continue
             if f.name.startswith(survey + "_parcels_modified"):
                 continue                                   # the parcel under test loses its anchor
@@ -98,13 +100,18 @@ def leave_one_out(village, surveys=None, mode="full", keep_work=True):
             if f.name in ("georef_status.csv", "anchors.csv"):
                 continue                                   # a fresh run, not the last one's verdicts
             shutil.copy2(f, work / "FMB_Vector" / village / f.name)
-        for extra in ("FMB_Georef", "FMB_Sketches"):
-            s = real_project / extra / village
-            if s.exists():
-                shutil.copytree(s, work / extra / village, dirs_exist_ok=True)
+        # the raster pin holds an absolute path, so copying the small json reuses the one GeoTIFF
+        # instead of pulling 67 MB of Google tiles again for every survey under test
+        georef_src = real_project / "FMB_Georef" / village
+        if georef_src.exists():
+            (work / "FMB_Georef" / village).mkdir(parents=True, exist_ok=True)
+            for f in georef_src.glob("*"):
+                if f.is_file() and f.suffix in (".json", ".xml"):
+                    shutil.copy2(f, work / "FMB_Georef" / village / f.name)
         sigma0 = engine.SIGMA_AUTO
         try:
             paths.PROJECT = work
+            neighbours._CACHE.pop(village, None)            # keyed by village, not by project root
             if mode == "gcp_only":
                 engine.SIGMA_AUTO = 1e6                    # anchors contribute nothing
             engine.run(village, do_raster=False, do_topology=False, do_review=False)
@@ -118,6 +125,7 @@ def leave_one_out(village, surveys=None, mode="full", keep_work=True):
         finally:
             paths.PROJECT = real_project
             engine.SIGMA_AUTO = sigma0
+            neighbours._CACHE.pop(village, None)
         tol_m, tol_deg = tolerances(truth)
         base = {"survey": survey, "mode": mode, "truth_rms_m": round(truth["rms"], 2),
                 "truth_source": truth["source"], "tolerance_m": round(tol_m, 2),
