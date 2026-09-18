@@ -33,7 +33,8 @@ def test_rigid_fit_rejects_a_mirror():
     Q[:, 1] *= -1
     theta, t, rms, mx = fit.rigid_fit(P, Q)
     moved = fit.transform_points(P, theta, t)
-    assert np.cross(moved[1] - moved[0], moved[2] - moved[1]) > 0, "handedness preserved"
+    u, v = moved[1] - moved[0], moved[2] - moved[1]
+    assert u[0] * v[1] - u[1] * v[0] > 0, "handedness preserved"   # 2D cross product
 
 
 def test_similarity_fit_reports_scale_and_anisotropy():
