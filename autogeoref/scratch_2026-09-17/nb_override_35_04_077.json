@@ -1,0 +1,470 @@
+{
+ "40A": [
+  {
+   "number": "39",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "169",
+   "side": "W",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "42B",
+   "side": "N",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "40B": [
+  {
+   "number": "41",
+   "side": "NW",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "169",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "42A",
+   "side": "NE",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "42A": [
+  {
+   "number": "41",
+   "side": "W",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "44",
+   "side": "NW",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "169",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "170",
+   "side": "NE",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "43B",
+   "side": "N",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "40B",
+   "side": "SW",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "42B": [
+  {
+   "number": "39",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "49",
+   "side": "NE",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "169",
+   "side": "W",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "170",
+   "side": "NW",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "43A",
+   "side": "N",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "40A",
+   "side": "S",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "43A": [
+  {
+   "number": "39",
+   "side": "SE",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "49",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "170",
+   "side": "W",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "46B",
+   "side": "N",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "42B",
+   "side": "S",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "43B": [
+  {
+   "number": "44",
+   "side": "W",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "45",
+   "side": "NW",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "170",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "46A",
+   "side": "N",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "42B",
+   "side": "S",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "46A": [
+  {
+   "number": "45",
+   "side": "SW",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "170",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "171",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "47B",
+   "side": "NE",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "43B",
+   "side": "S",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "46B": [
+  {
+   "number": "49",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "170",
+   "side": "W",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "171",
+   "side": "NW",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "47A",
+   "side": "N",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "43A",
+   "side": "S",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "47A": [
+  {
+   "number": "49",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "170",
+   "side": "SW",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "171",
+   "side": "W",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "48B",
+   "side": "N",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "46B",
+   "side": "S",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "47B": [
+  {
+   "number": "171",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "48A",
+   "side": "N",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "46A",
+   "side": "S",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "48A": [
+  {
+   "number": "171",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "47B",
+   "side": "S",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "48B": [
+  {
+   "number": "49",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "171",
+   "side": "W",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "47A",
+   "side": "S",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "169": [
+  {
+   "number": "170",
+   "side": "N",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "42B",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "40A",
+   "side": "SE",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "40B",
+   "side": "SW",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "42A",
+   "side": "W",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "170": [
+  {
+   "number": "169",
+   "side": "S",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "171",
+   "side": "N",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "47B",
+   "side": "NW",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "47A",
+   "side": "NE",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "46B",
+   "side": "NE",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "43A",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "42B",
+   "side": "SE",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "42A",
+   "side": "SW",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "43B",
+   "side": "W",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "46A",
+   "side": "NW",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ],
+ "171": [
+  {
+   "number": "170",
+   "side": "S",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "48A",
+   "side": "NW",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "48B",
+   "side": "NE",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "47B",
+   "side": "W",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "47A",
+   "side": "E",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "46A",
+   "side": "SW",
+   "readers": 2,
+   "confidence": "high"
+  },
+  {
+   "number": "46B",
+   "side": "SE",
+   "readers": 2,
+   "confidence": "high"
+  }
+ ]
+}

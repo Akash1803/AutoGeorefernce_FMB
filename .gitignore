@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+autogeoref/scratch_2026-09-17/__pycache__/

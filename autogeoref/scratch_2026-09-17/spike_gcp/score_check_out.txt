@@ -1,0 +1,4 @@
+segments >=3 m: 4327 total length m: 28473
+170   len= 485.5 m  spec-score@manual=0.46  spike-share@manual=0.47  best WRONG pose score=0.49 at (dx,dy,dth)=(-14, 10, 0)
+171   len= 475.7 m  spec-score@manual=0.64  spike-share@manual=0.74  best WRONG pose score=0.65 at (dx,dy,dth)=(8, 18, 0)
+46B   len= 182.3 m  spec-score@manual=0.10  spike-share@manual=0.14  best WRONG pose score=0.46 at (dx,dy,dth)=(-16, 8, 0)
