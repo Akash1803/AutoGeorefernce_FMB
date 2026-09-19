@@ -64,10 +64,15 @@ verdict.
 
 | Colour | Meaning | What to do |
 |---|---|---|
-| Green | agrees with two or more neighbours, or one neighbour plus clear satellite edges | spot-check |
-| Amber | one supporting signal only | look at it |
-| Red | contradicts its neighbours, no neighbour shares a boundary, or the satellite could not tell two poses apart | fix by hand |
-| Waiting | no placed neighbour touches it yet | place a neighbour first or seed it |
+| Green | fits three or more placed neighbours and no other pose comes close, or fits two neighbours with a clear satellite match | spot-check |
+| Amber | fits one or two neighbours, or three with another pose nearly as good | look at it |
+| Red | one neighbour and nothing else, contradicts its neighbours, or lands away from two parcels its own sheet names | fix by hand |
+| Waiting | no placed neighbour shares a boundary with it yet | place a neighbour first or seed it |
+
+On the 15 hand-placed parcels of Kizhikaranai, hiding each one in turn and letting the tool
+place it from the other 14: 10 landed within 3 m of your placement, 13 within 5 m, both greens
+were under 1.6 m, and the one red was the 16 m miss. Your own placements disagree with each
+other by 1 to 3 m, so treat anything within 3 m as agreement.
 
 Three rules override everything else:
 
