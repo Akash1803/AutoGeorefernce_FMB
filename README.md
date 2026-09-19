@@ -1,4 +1,4 @@
-# fmb-georef
+# AutoGeorefernce_FMB
 
 Tamil Nadu Field Measurement Book (FMB) sheets, from the Collabland portal PDF to a
 georeferenced parcel on the ground, with every printed dimension kept exactly.
