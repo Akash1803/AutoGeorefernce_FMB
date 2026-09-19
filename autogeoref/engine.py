@@ -34,11 +34,17 @@ MAX_OVERLAP_SHARE = 0.02     # a pose may not sit on top of a parcel already on 
 POSE_TOL_DEG = 1.0           # candidate poses closer than this are the same pose
 POSE_TOL_M = 2.0
 IMAGE_TOP_N = 3              # imagery is asked to confirm the best neighbour-ranked poses only
+SUPPORT_MARGIN = 0.80        # the runner-up pose must explain less than this share of the best
+                             # pose's boundary, or the neighbours have not really chosen
+PRINTED_REACH_M = 10.0       # a placed parcel the sheet names as a neighbour must be this close
 
 
 def colour_of(row):
     rms = row.get("boundary_rms_m")
     if row.get("method") == "puvi-only":
+        return "red"
+    if row.get("printed_far"):
+        # the sheet names a neighbour that is on the ground, and the pose does not reach it
         return "red"
     if rms is not None and rms > MAX_RESIDUAL_M:
         # 43A landed 971 m out on 2026-09-18 with a 27.6 m boundary residual and still read amber,
@@ -51,7 +57,12 @@ def colour_of(row):
     anchored = rms is not None and rms <= allow
     strong_image = (row.get("share") or 0.0) >= GREEN_SHARE and row.get("observable")
     weak_image = (row.get("share") or 0.0) >= AMBER_SHARE and row.get("observable")
-    if anchored and (strong_image or (row.get("n_neighbours") or 0) >= 2):
+    # 42A on 2026-09-19: two poses explained 348 m and 347 m of boundary (a slide along the
+    # railway strip), the residual was 1.5 m, and the parcel was 6.4 m out. A tie between poses
+    # means the neighbours did not choose; imagery may break it, geometry alone may not.
+    best, nxt = row.get("support_m") or 0.0, row.get("support_next_m") or 0.0
+    decisive = best > 0 and nxt <= SUPPORT_MARGIN * best
+    if anchored and (strong_image or (decisive and (row.get("n_neighbours") or 0) >= 2)):
         return "green"
     if anchored or strong_image or weak_image:
         return "amber"
@@ -230,24 +241,45 @@ def _overlap(village, survey, pose, bodies):
     return worst
 
 
+def printed_contradictions(village, survey, pose, bodies, reach_m=PRINTED_REACH_M):
+    """Placed parcels this sheet names as neighbours that the pose does not come near.
+
+    47A on 2026-09-19 sat 129 m from the team's placement with a 0.75 m residual against one
+    long congruent boundary. Its own sheet names 46B, 47B and 48A around it, all placed, and the
+    pose touched none of them. The transcription is the cheapest truth we have.
+    """
+    body = unary_union([fit.apply_pose(g, pose[0], pose[1])
+                        for _p, g in sheets.load_sheet(village, survey)])
+    far = []
+    for other in neighbours.printed(village, survey):
+        if other in bodies and other != survey and body.distance(bodies[other]) > reach_m:
+            far.append(other)
+    return sorted(far, key=paths.survey_sort_key)
+
+
 def rank_poses(village, survey, candidates, placed, anchor_map, bodies=None):
-    """Candidates that do not eat a neighbour, best-supported first: [(support_m, partners, pose)]."""
+    """Candidates that do not eat a neighbour, best-supported first: [(support_m, partners, pose)].
+
+    A pose that lands away from a placed parcel the sheet itself names is kept only as a last
+    resort, ranked below every pose that honours the printed neighbours.
+    """
     bodies = bodies if bodies is not None else placed_bodies(village, placed)
     scored = []
     for pose in candidates:
         if _overlap(village, survey, pose, bodies) > MAX_OVERLAP_SHARE:
             continue
         _obs, supported, partners = neighbour_chains(village, survey, pose, placed, anchor_map)
-        scored.append((supported, len(partners), pose))
-    scored.sort(key=lambda s: (-s[0], -s[1]))
-    return scored
+        far = printed_contradictions(village, survey, pose, bodies)
+        scored.append((supported, len(partners), pose, len(far)))
+    scored.sort(key=lambda s: (s[3], -s[0], -s[1]))
+    return [(s[0], s[1], s[2]) for s in scored], [s[3] for s in scored]
 
 
 def choose_pose(village, survey, candidates, placed, anchor_map, image=None, ranked=None):
     """Score candidate poses by how much shared boundary they explain without eating a neighbour."""
-    scored = list(ranked) if ranked is not None else rank_poses(village, survey, candidates, placed, anchor_map)
+    scored = list(ranked) if ranked is not None else rank_poses(village, survey, candidates, placed, anchor_map)[0]
     if image is not None and all(p is not image for _s, _n, p in scored):
-        scored += rank_poses(village, survey, [image], placed, anchor_map)
+        scored += rank_poses(village, survey, [image], placed, anchor_map)[0]
         scored.sort(key=lambda s: (-s[0], -s[1]))
     if not scored:
         if image is not None:
@@ -293,7 +325,7 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
         cands = dedupe_poses(pose_candidates(village, survey, placed))
         poses = [(c["theta"], c["t"]) for c in cands]
         row["n_candidates"] = len(poses)
-        ranked = rank_poses(village, survey, poses, placed, anchor_map, bodies)
+        ranked, far_counts = rank_poses(village, survey, poses, placed, anchor_map, bodies)
         image_pose = None
         if index is not None and ranked:
             pts, brg = sheets.sample_outline(sheets.outline(sheets.load_sheet(village, survey)), 1.0)
@@ -304,6 +336,14 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
                 image_pose = (res.theta, res.t)
         pose, why = choose_pose(village, survey, poses, placed, anchor_map, image=image_pose,
                                 ranked=ranked)
+        row["support_m"] = round(ranked[0][0], 1) if ranked else 0.0
+        row["support_next_m"] = round(ranked[1][0], 1) if len(ranked) > 1 else 0.0
+        if pose is not None:
+            far = printed_contradictions(village, survey, pose, bodies)
+            row["printed_far"] = ",".join(far)
+            if far:
+                row["notes"] = " | ".join(x for x in (row.get("notes"),
+                                                       "does not reach printed neighbour(s) " + ",".join(far)) if x)
         row["notes"] = " | ".join(x for x in (row.get("notes"), why) if x)
         if pose is not None:
             row["method"] = "image" if (image_pose is not None and pose is image_pose) else "neighbour"

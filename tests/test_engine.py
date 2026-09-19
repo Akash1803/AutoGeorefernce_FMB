@@ -96,3 +96,38 @@ def test_dedupe_collapses_the_same_pose_from_many_chains():
     out = engine.dedupe_poses([base, near, far])
     assert len(out) == 2
     assert max(c["votes"] for c in out) == 2
+
+
+def test_a_tie_between_poses_is_never_green():
+    """42A, 2026-09-19: 348 m vs 347 m of support, residual 1.5 m, parcel 6.4 m out."""
+    tie = {"boundary_rms_m": 1.48, "anchor_rms_m": 2.2, "share": 0.60, "observable": False,
+           "n_neighbours": 4, "method": "neighbour", "ambiguous": False,
+           "support_m": 348.0, "support_next_m": 347.0}
+    assert engine.colour_of(tie) == "amber"
+    clear = dict(tie, support_m=271.0, support_next_m=29.0)
+    assert engine.colour_of(clear) == "green"
+    imaged = dict(tie, share=0.75, observable=True)
+    assert engine.colour_of(imaged) == "green", "clear imagery may break a geometric tie"
+
+
+def test_a_pose_that_misses_a_printed_neighbour_is_red():
+    """47A, 2026-09-19: 129 m out, residual 0.75 m, and none of 46B/47B/48A within reach."""
+    row = {"boundary_rms_m": 0.75, "anchor_rms_m": 2.2, "share": 0.6, "observable": True,
+           "n_neighbours": 1, "method": "neighbour", "ambiguous": False,
+           "support_m": 120.0, "support_next_m": 20.0, "printed_far": "46B,48A"}
+    assert engine.colour_of(row) == "red"
+    assert engine.colour_of(dict(row, printed_far="")) != "red"
+
+
+def test_printed_contradictions_reads_the_transcription():
+    from autogeoref import anchors, evaluate, paths
+    if not paths.vector_dir("35_04_077").exists():
+        pytest.skip("village not present")
+    v, s = "35_04_077", "47A"
+    amap = {k: a for k, a in anchors.load_anchors(v, set()).items() if k != s}
+    placed = {k: (a.theta, a.t) for k, a in amap.items()}
+    bodies = engine.placed_bodies(v, placed)
+    truth = evaluate.truth_pose(v, s)
+    assert engine.printed_contradictions(v, s, (truth["theta"], truth["t"]), bodies) == []
+    wrong = (truth["theta"], truth["t"] + np.array([129.0, 0.0]))
+    assert engine.printed_contradictions(v, s, wrong, bodies), "129 m away reaches nothing"
