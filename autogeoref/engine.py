@@ -29,8 +29,12 @@ CHAIN_GATE_M = 40.0          # a chain whose paired points are further apart tha
                              # is a congruent boundary somewhere else, not this parcel's boundary
 MAX_RESIDUAL_M = 5.0         # above this the placement contradicts its own neighbours
 CHAIN_MIN_M = 12.0           # a shared run shorter than this pins nothing
-CHAIN_FIT_RMS = 1.0          # metres: how well a chain must fit before its pose is a candidate
+CHAIN_FIT_RMS = 2.0          # metres: how well a chain must fit before its pose is a candidate
+ADJUST_GATE_M = 8.0          # chains admitted to the adjustment: correct ones sit within the
+                             # anchors' disagreement (about 3 m); wrong ones were 13 m and more
 MAX_OVERLAP_SHARE = 0.02     # a pose may not sit on top of a parcel already on the ground
+OVERLAP_TOL_M = 3.0          # the team's own placements disagree by up to 3 m; an overlap strip
+                             # that thin along a shared edge is not "sitting on top of" anything
 POSE_TOL_DEG = 1.0           # candidate poses closer than this are the same pose
 POSE_TOL_M = 2.0
 IMAGE_TOP_N = 3              # imagery is asked to confirm the best neighbour-ranked poses only
@@ -227,15 +231,27 @@ def placed_bodies(village, placed):
             for other, (th_o, t_o) in placed.items()}
 
 
-def _overlap(village, survey, pose, bodies):
-    """Share of the smaller parcel that this pose steals from something already on the ground."""
+def _overlap(village, survey, pose, bodies, tol_m=OVERLAP_TOL_M):
+    """Share of the smaller parcel that this pose steals from something already on the ground.
+
+    Both parcels are eroded by `tol_m` first. On 2026-09-19 the unfiltered test rejected the
+    correct pose of 47A (0.1 m from the team's) because a 2 m strip along its 120 m edge with
+    171 was 10 % of its area; every thin parcel and all three railway strips lost their correct
+    candidate the same way. A wrong pose that really sits on a neighbour survives the erosion.
+    """
     body = unary_union([fit.apply_pose(g, pose[0], pose[1])
                         for _p, g in sheets.load_sheet(village, survey)])
+    core = body.buffer(-tol_m)
+    if core.is_empty:
+        core = body                                # a parcel thinner than 2 * tol_m: compare as is
     worst = 0.0
     for other, og in bodies.items():
         if other == survey:
             continue
-        inter = body.intersection(og).area
+        oc = og.buffer(-tol_m)
+        if oc.is_empty:
+            oc = og
+        inter = core.intersection(oc).area
         if inter > 0:
             worst = max(worst, inter / max(min(body.area, og.area), 1.0))
     return worst
@@ -362,7 +378,8 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
     pair_obs, line_obs, gcp_obs, priors = [], [], [], []
     for s in free:
         priors.append(fit.PosePrior(s, free[s][0], tuple(free[s][1]), SIGMA_START, 10.0))
-        obs, _supported, _partners = neighbour_chains(village, s, free[s], placed, anchor_map)
+        obs, _supported, _partners = neighbour_chains(village, s, free[s], placed, anchor_map,
+                                                      gate_m=ADJUST_GATE_M)
         pair_obs += obs
     adjusted = fit.block_adjust(free, {s: (a.theta, a.t) for s, a in anchor_map.items()},
                                 pair_obs, line_obs, gcp_obs, priors)

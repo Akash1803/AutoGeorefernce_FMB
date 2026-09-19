@@ -131,3 +131,20 @@ def test_printed_contradictions_reads_the_transcription():
     assert engine.printed_contradictions(v, s, (truth["theta"], truth["t"]), bodies) == []
     wrong = (truth["theta"], truth["t"] + np.array([129.0, 0.0]))
     assert engine.printed_contradictions(v, s, wrong, bodies), "129 m away reaches nothing"
+
+
+def test_overlap_ignores_a_strip_as_thin_as_the_anchors_disagree(tmp_path, monkeypatch):
+    """47A's correct pose overlapped 171 by a 2 m strip along 120 m; that is not sitting on it."""
+    import geopandas as gpd
+    from shapely.geometry import Polygon
+    from autogeoref import paths
+    monkeypatch.setattr(paths, "PROJECT", tmp_path)
+    (tmp_path / "FMB_Vector" / "V").mkdir(parents=True)
+    sheet = Polygon([(0, 0), (120, 0), (120, 25), (0, 25)])
+    gpd.GeoDataFrame({"poly_id": [1]}, geometry=[sheet]).to_file(
+        tmp_path / "FMB_Vector" / "V" / "A_parcels.geojson", driver="GeoJSON")
+    pose = (0.0, np.array([0.0, 0.0]))
+    neighbour_2m_over = Polygon([(0, 23), (120, 23), (120, 60), (0, 60)])      # 2 m strip overlap
+    neighbour_on_top = Polygon([(10, 5), (110, 5), (110, 20), (10, 20)])       # really on top
+    assert engine._overlap("V", "A", pose, {"B": neighbour_2m_over}) <= engine.MAX_OVERLAP_SHARE
+    assert engine._overlap("V", "A", pose, {"B": neighbour_on_top}) > engine.MAX_OVERLAP_SHARE

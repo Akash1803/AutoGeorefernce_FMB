@@ -42,19 +42,30 @@ class LineObs:
     distance_now: float
 
 
-def common_chains(vq, vp, tol_abs=0.30, tol_rel=0.01, min_len=8.0, pass_deg=5.0):
-    """Every run of consecutive equal-length edges shared by rings vq and vp, longest first."""
+TURN_TOL = 10.0     # degrees: matched corners must bend the same way, or the rings have parted
+
+
+def common_chains(vq, vp, tol_abs=0.30, tol_rel=0.01, min_len=8.0, pass_deg=5.0, turn_tol=TURN_TOL):
+    """Every run of consecutive equal-length edges shared by rings vq and vp, longest first.
+
+    The walk ends at a matched vertex where the two rings turn differently: that is the corner
+    where the shared boundary stops and each parcel goes its own way. Without this check the
+    2026-09-19 run walked 46A's outline two edges past its boundary with 43B, because the next
+    edges happened to be 28 m and 27 m long, and the pairs it added were 52 m and 137 m apart.
+    """
     def tol(x):
         return tol_abs + tol_rel * max(x, 1.0)
 
     eq = sheets.edge_lengths(vq)
     tq = sheets.turn_angles(vq)
+    sq = sheets.signed_turns(vq)
     nq = len(eq)
     seen, out = set(), []
     for reverse in (True, False):
         vp2 = vp[::-1] if reverse else vp
         ep = sheets.edge_lengths(vp2)
         tp = sheets.turn_angles(vp2)
+        sp = sheets.signed_turns(vp2)
         np_len = len(ep)
         for i in range(nq):
             for j in range(np_len):
@@ -68,7 +79,10 @@ def common_chains(vq, vp, tol_abs=0.30, tol_rel=0.01, min_len=8.0, pass_deg=5.0)
                         cq, cp, iq, ip = q_next, p_next, iq + 1, ip + 1
                         pairs.append((vq[(i + iq) % nq], vp2[(j + ip) % np_len]))
                         matched = min(cq, cp)
-                        if tq[(i + iq) % nq] >= pass_deg:
+                        kq, kp = (i + iq) % nq, (j + ip) % np_len
+                        if tq[kq] >= pass_deg or tp[kp] >= pass_deg:
+                            if abs(sq[kq] - sp[kp]) > turn_tol:
+                                break               # a shared corner, then the rings part
                             corners += 1
                         if iq >= nq or ip >= np_len:
                             break

@@ -55,6 +55,17 @@ def turn_angles(v):
     return out
 
 
+def signed_turns(v):
+    """Signed turn at each vertex in the ring's own traversal direction: +left, -right."""
+    n = len(v)
+    out = []
+    for i in range(n):
+        a, b, c = v[i - 1], v[i], v[(i + 1) % n]
+        t = math.degrees(math.atan2(c[1] - b[1], c[0] - b[0]) - math.atan2(b[1] - a[1], b[0] - a[0]))
+        out.append((t + 180) % 360 - 180)
+    return out
+
+
 def sample_outline(v, step=1.0):
     """Points every `step` metres along the ring, with each sample's edge bearing in radians."""
     pts, brg = [], []

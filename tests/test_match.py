@@ -65,3 +65,21 @@ def test_chain_observations_carry_both_survey_ids_and_sigma():
     obs = match.chain_observations(chains[0], "A", "B", sigma=0.30)
     assert len(obs) == chains[0].n_pairs
     assert all(o.a == "A" and o.b == "B" and o.sigma == 0.30 for o in obs)
+
+
+
+def test_the_walk_stops_where_the_rings_turn_different_ways():
+    """46A vs 43B, 2026-09-19: after the shared run both rings had a next edge of about 27 m,
+    one turning left and one turning right. The walk must end at that corner."""
+    q = [(0.0, 27.0), (60.0, 27.0), (60.0, 0.0), (0.0, 0.0)]                 # clockwise, above
+    p = [(0.0, 0.0), (60.0, 0.0), (60.0, -27.0), (0.0, -27.0)]              # clockwise, below
+    chains = match.common_chains(q, p, min_len=8.0)
+    # congruent rectangles also match around their whole perimeter, and a walk may start on any
+    # vertex pair (position-blind, by design). What the turn rule guarantees is that the run
+    # along the true shared edge is returned on its own, ending at the corner where they part,
+    # instead of being swallowed into a longer chain with wrong pairs on its tail.
+    coincide = lambda pa, pb: abs(pa[0] - pb[0]) < 1e-6 and abs(pa[1] - pb[1]) < 1e-6
+    exact = [c for c in chains if all(coincide(pa, pb) for pa, pb in c.pairs)]
+    assert exact, "the shared edge must come back as a chain of genuinely shared points"
+    assert max(c.length for c in exact) == pytest.approx(60.0, abs=0.01)
+    assert all(c.n_pairs == 2 for c in exact), "the walk must stop at the divergence corner"
