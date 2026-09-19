@@ -2,3 +2,12 @@ __pycache__/
 *.pyc
 .pytest_cache/
 autogeoref/scratch_2026-09-17/__pycache__/
+
+# satellite exports and spike rasters: Google imagery, internal review only, never published
+*.tif
+*.tiff
+*.ecw
+autogeoref/scratch_2026-09-17/spike_gcp/*.png
+# project data lives under D:\Projects, never in the repo
+*.gpkg
+*.pdf

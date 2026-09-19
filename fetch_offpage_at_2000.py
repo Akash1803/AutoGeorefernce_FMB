@@ -6,7 +6,9 @@ D = r"D:\Projects\Tambaram_Chengalpattu\FMB_Sketches"
 URL = "https://collabland-tn.gov.in/APIServices/rest/Collabland/FMBMapServicePDF"
 s = requests.Session(); s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "*/*", "Origin": "https://collabland-tn.gov.in",
     "Referer": "https://collabland-tn.gov.in/APIServices/FMBMapService.jsp", "X-Requested-With": "XMLHttpRequest"})
-s.cookies.update({"JSESSIONID": "REDACTED_SESSION_COOKIE"})
+if not os.environ.get("FMB_JSESSIONID"):
+    raise SystemExit("set FMB_JSESSIONID to the portal session cookie (browser dev tools -> Application -> Cookies)")
+s.cookies.update({"JSESSIONID": os.environ["FMB_JSESSIONID"]})
 rows = list(csv.DictReader(open(os.path.join(D, "offpage_sheets.csv"), encoding="utf-8")))
 for r in rows:
     _, t, v = r["village_code"].split("_"); gis = "S35%s%s%s" % (t, v, r["survey_no"])
