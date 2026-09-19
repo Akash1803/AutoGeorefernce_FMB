@@ -31,6 +31,9 @@ MAX_RESIDUAL_M = 5.0         # above this the placement contradicts its own neig
 CHAIN_MIN_M = 12.0           # a shared run shorter than this pins nothing
 CHAIN_FIT_RMS = 1.0          # metres: how well a chain must fit before its pose is a candidate
 MAX_OVERLAP_SHARE = 0.02     # a pose may not sit on top of a parcel already on the ground
+POSE_TOL_DEG = 1.0           # candidate poses closer than this are the same pose
+POSE_TOL_M = 2.0
+IMAGE_TOP_N = 3              # imagery is asked to confirm the best neighbour-ranked poses only
 
 
 def colour_of(row):
@@ -140,7 +143,13 @@ def neighbour_chains(village, survey, pose, placed, anchor_map, gate_m=CHAIN_GAT
             if gap > gate_m:
                 continue
             sigma = SIGMA_AUTO + (anchor_map[other].rms if other in anchor_map else 0.0)
-            obs += match.chain_observations(chain, survey, other, sigma)
+            # the solver applies each survey's pose to its observation points, so they must be
+            # handed over in that survey's own sheet metres. Passing the ground points here moved
+            # a correctly chosen 46B 72 m on 2026-09-19.
+            local = match.Chain(chain.length, [
+                (tuple(fit.unapply_pose(pa, theta, t)[0]), tuple(fit.unapply_pose(pb, th_o, t_o)[0]))
+                for pa, pb in chain.pairs], chain.n_pairs, chain.corners)
+            obs += match.chain_observations(local, survey, other, sigma)
             supported += chain.length
             partners.append(other)
             break                     # the best surviving chain per neighbour
@@ -173,31 +182,73 @@ def pose_candidates(village, survey, placed, min_len=CHAIN_MIN_M, max_rms=CHAIN_
     return out
 
 
-def _overlap(village, survey, pose, placed):
-    """Area this pose steals from parcels that are already on the ground."""
+def dedupe_poses(cands, tol_deg=POSE_TOL_DEG, tol_m=POSE_TOL_M):
+    """Collapse candidates that describe the same placement; `votes` counts how many chains agree.
+
+    40B produced 148 candidates on 2026-09-19 (a strip with many equal edges) and the satellite
+    search alone then took over nine minutes. Most were the same pose from different chains.
+    """
+    out = []
+    for c in sorted(cands, key=lambda c: -c["chain_m"]):
+        for u in out:
+            d_th = abs(((c["theta"] - u["theta"]) + 180) % 360 - 180)
+            if d_th <= tol_deg and _landing_gap(c, u) <= tol_m:
+                u["votes"] += 1
+                u["chain_m"] = max(u["chain_m"], c["chain_m"])
+                break
+        else:
+            out.append(dict(c, votes=1))
+    return out
+
+
+def _landing_gap(c, u):
+    # t is the translation after rotating about the UTM origin, so two poses that differ by a
+    # fraction of a degree differ in t by kilometres; compare where a sheet point actually lands
+    probe = np.array([[50.0, 50.0]])
+    a = fit.transform_points(probe, c["theta"], c["t"])[0]
+    b = fit.transform_points(probe, u["theta"], u["t"])[0]
+    return float(np.linalg.norm(a - b))
+
+
+def placed_bodies(village, placed):
+    return {other: unary_union([fit.apply_pose(g, th_o, t_o)
+                                for _p, g in sheets.load_sheet(village, other)])
+            for other, (th_o, t_o) in placed.items()}
+
+
+def _overlap(village, survey, pose, bodies):
+    """Share of the smaller parcel that this pose steals from something already on the ground."""
     body = unary_union([fit.apply_pose(g, pose[0], pose[1])
                         for _p, g in sheets.load_sheet(village, survey)])
     worst = 0.0
-    for other, (th_o, t_o) in placed.items():
+    for other, og in bodies.items():
         if other == survey:
             continue
-        og = unary_union([fit.apply_pose(g, th_o, t_o)
-                          for _p, g in sheets.load_sheet(village, other)])
         inter = body.intersection(og).area
         if inter > 0:
             worst = max(worst, inter / max(min(body.area, og.area), 1.0))
     return worst
 
 
-def choose_pose(village, survey, candidates, placed, anchor_map, image=None):
-    """Score candidate poses by how much shared boundary they explain without eating a neighbour."""
+def rank_poses(village, survey, candidates, placed, anchor_map, bodies=None):
+    """Candidates that do not eat a neighbour, best-supported first: [(support_m, partners, pose)]."""
+    bodies = bodies if bodies is not None else placed_bodies(village, placed)
     scored = []
     for pose in candidates:
-        if _overlap(village, survey, pose, placed) > MAX_OVERLAP_SHARE:
+        if _overlap(village, survey, pose, bodies) > MAX_OVERLAP_SHARE:
             continue
         _obs, supported, partners = neighbour_chains(village, survey, pose, placed, anchor_map)
         scored.append((supported, len(partners), pose))
     scored.sort(key=lambda s: (-s[0], -s[1]))
+    return scored
+
+
+def choose_pose(village, survey, candidates, placed, anchor_map, image=None, ranked=None):
+    """Score candidate poses by how much shared boundary they explain without eating a neighbour."""
+    scored = list(ranked) if ranked is not None else rank_poses(village, survey, candidates, placed, anchor_map)
+    if image is not None and all(p is not image for _s, _n, p in scored):
+        scored += rank_poses(village, survey, [image], placed, anchor_map)
+        scored.sort(key=lambda s: (-s[0], -s[1]))
     if not scored:
         if image is not None:
             return image, "no pose agrees with the neighbours; pose from imagery"
@@ -235,22 +286,24 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
     if todo and raster.pinned(village) is not None:
         index = edgemod.SegmentIndex(edgemod.detect(raster.pinned(village)["path"], min_len_m=3.0))
 
+    bodies = placed_bodies(village, placed)
     for survey in todo:
         row = {"survey": survey, "run": stamp, "method": "puvi-only", "ambiguous": False,
                "notes": "", "n_neighbours": 0, "file": paths.output_path(village, survey).name}
-        cands = pose_candidates(village, survey, placed)
+        cands = dedupe_poses(pose_candidates(village, survey, placed))
         poses = [(c["theta"], c["t"]) for c in cands]
         row["n_candidates"] = len(poses)
+        ranked = rank_poses(village, survey, poses, placed, anchor_map, bodies)
         image_pose = None
-        if index is not None and poses:
+        if index is not None and ranked:
             pts, brg = sheets.sample_outline(sheets.outline(sheets.load_sheet(village, survey)), 1.0)
-            res = align.search(pts, brg, index, poses)
+            res = align.search(pts, brg, index, [p for _s, _n, p in ranked[:IMAGE_TOP_N]])
             row.update({"share": round(res.share, 3), "margin": round(res.margin, 3),
                         "observable": res.observable, "ambiguous": res.ambiguous, "notes": res.note})
             if not res.ambiguous and res.observable:
                 image_pose = (res.theta, res.t)
-        pose, why = choose_pose(village, survey, poses + ([image_pose] if image_pose else []),
-                                placed, anchor_map, image=image_pose)
+        pose, why = choose_pose(village, survey, poses, placed, anchor_map, image=image_pose,
+                                ranked=ranked)
         row["notes"] = " | ".join(x for x in (row.get("notes"), why) if x)
         if pose is not None:
             row["method"] = "image" if (image_pose is not None and pose is image_pose) else "neighbour"
@@ -260,6 +313,8 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
             continue
         row["heading_deg"] = round(pose[0], 3)
         placed[survey] = pose
+        bodies[survey] = unary_union([fit.apply_pose(g, pose[0], pose[1])
+                                      for _p, g in sheets.load_sheet(village, survey)])
         rows.append(row)
 
     # block adjustment: anchors fixed, everything else free

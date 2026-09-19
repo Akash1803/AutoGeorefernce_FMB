@@ -49,6 +49,14 @@ def transform_points(P, theta_deg, t):
     return (R @ np.asarray(P, float).T).T + np.asarray(t, float)
 
 
+def unapply_pose(P, theta_deg, t):
+    """Ground points back into the sheet's own metres: the inverse of transform_points."""
+    P = np.asarray(P, float).reshape(-1, 2) - np.asarray(t, float)
+    th = math.radians(theta_deg)
+    R = np.array([[math.cos(th), -math.sin(th)], [math.sin(th), math.cos(th)]])
+    return P @ R                    # R^T applied on the right == R^-1 on the left
+
+
 def apply_pose(geom, theta_deg, t):
     return affinity.translate(affinity.rotate(geom, theta_deg, origin=(0, 0)), float(t[0]), float(t[1]))
 

@@ -55,3 +55,10 @@ def test_apply_pose_preserves_area_and_perimeter():
 def test_assert_rigid_catches_a_stretch():
     with pytest.raises(AssertionError):
         fit.assert_rigid(SQUARE, affinity.scale(SQUARE, 1.01, 1.01))
+
+
+def test_unapply_pose_inverts_transform_points():
+    P = np.array([[0.0, 0.0], [120.0, 0.0], [120.0, 80.0], [3.5, 77.25]])
+    theta, t = -23.9, np.array([392900.0, 1413500.0])
+    back = fit.unapply_pose(fit.transform_points(P, theta, t), theta, t)
+    assert np.allclose(back, P, atol=1e-6)
