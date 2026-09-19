@@ -23,8 +23,15 @@ SIGMA_IMAGE = 1.0
 SIGMA_START = 10.0
 IMAGE_MAX_SHIFT = 1.5        # imagery may move an anchored pose by at most this
 IMAGE_MAX_TURN = 2.0
-GREEN_SHARE = 0.60           # recalibrated in Task 17 and written back here
-AMBER_SHARE = 0.35
+# Calibrated on the Kizhikaranai leave-one-out of 2026-09-19 (15 parcels, table in spec section 3).
+# Satellite edges were observable on only 3 of 15 parcels there, and the one parcel they alone
+# would have passed (48A, share 0.81) was 4.1 m out, so the image thresholds are deliberately high.
+GREEN_SHARE = 0.85
+AMBER_SHARE = 0.45
+GREEN_MIN_NEIGHBOURS = 3     # every parcel with three supporting neighbours landed within 2.7 m;
+                             # with two, 47B/48A/48B were 4-9 m out and looked no different
+DISTINCT_M = 5.0             # a runner-up pose must land this far from the best, or turn
+DISTINCT_DEG = 3.0           # this much, to count as a different answer (else it is the same pose)
 CHAIN_GATE_M = 40.0          # a chain whose paired points are further apart than the search window
                              # is a congruent boundary somewhere else, not this parcel's boundary
 MAX_RESIDUAL_M = 5.0         # above this the placement contradicts its own neighbours
@@ -47,8 +54,9 @@ def colour_of(row):
     rms = row.get("boundary_rms_m")
     if row.get("method") == "puvi-only":
         return "red"
-    if row.get("printed_far"):
-        # the sheet names a neighbour that is on the ground, and the pose does not reach it
+    far = [x for x in str(row.get("printed_far") or "").split(",") if x]
+    if len(far) >= 2:
+        # the sheet names neighbours that are on the ground, and the pose reaches none of them
         return "red"
     if rms is not None and rms > MAX_RESIDUAL_M:
         # 43A landed 971 m out on 2026-09-18 with a 27.6 m boundary residual and still read amber,
@@ -66,7 +74,14 @@ def colour_of(row):
     # means the neighbours did not choose; imagery may break it, geometry alone may not.
     best, nxt = row.get("support_m") or 0.0, row.get("support_next_m") or 0.0
     decisive = best > 0 and nxt <= SUPPORT_MARGIN * best
-    if anchored and (strong_image or (decisive and (row.get("n_neighbours") or 0) >= 2)):
+    n = row.get("n_neighbours") or 0
+    if n <= 1 and not (strong_image or weak_image):
+        # 40B, 2026-09-19: one neighbour, residual 0.24 m, 16 m out. One chain pins a line, not
+        # a parcel, and nothing else vouched for it.
+        return "red"
+    if far:
+        return "amber" if (anchored or strong_image or weak_image) else "red"
+    if anchored and ((strong_image and n >= 2) or (decisive and n >= GREEN_MIN_NEIGHBOURS)):
         return "green"
     if anchored or strong_image or weak_image:
         return "amber"
@@ -291,6 +306,24 @@ def rank_poses(village, survey, candidates, placed, anchor_map, bodies=None):
     return [(s[0], s[1], s[2]) for s in scored], [s[3] for s in scored]
 
 
+def _runner_up(village, survey, ranked):
+    """Support of the best pose that is a different answer from the winner.
+
+    Many candidates are the same placement reached through different chains and differ by
+    centimetres; on 2026-09-19 that made support_next equal support on 13 of 15 parcels and
+    nothing could ever be green.
+    """
+    best = ranked[0][2]
+    probe = np.array([[50.0, 50.0]])
+    b = fit.transform_points(probe, best[0], best[1])[0]
+    for support, _n, pose in ranked[1:]:
+        d_th = abs(((pose[0] - best[0]) + 180) % 360 - 180)
+        gap = float(np.linalg.norm(fit.transform_points(probe, pose[0], pose[1])[0] - b))
+        if gap >= DISTINCT_M or d_th >= DISTINCT_DEG:
+            return support
+    return 0.0
+
+
 def choose_pose(village, survey, candidates, placed, anchor_map, image=None, ranked=None):
     """Score candidate poses by how much shared boundary they explain without eating a neighbour."""
     scored = list(ranked) if ranked is not None else rank_poses(village, survey, candidates, placed, anchor_map)[0]
@@ -353,7 +386,7 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
         pose, why = choose_pose(village, survey, poses, placed, anchor_map, image=image_pose,
                                 ranked=ranked)
         row["support_m"] = round(ranked[0][0], 1) if ranked else 0.0
-        row["support_next_m"] = round(ranked[1][0], 1) if len(ranked) > 1 else 0.0
+        row["support_next_m"] = round(_runner_up(village, survey, ranked), 1) if ranked else 0.0
         if pose is not None:
             far = printed_contradictions(village, survey, pose, bodies)
             row["printed_far"] = ",".join(far)

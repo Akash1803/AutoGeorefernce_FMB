@@ -4,16 +4,20 @@ import pytest
 from autogeoref import engine
 
 
-def test_colour_rule_green_needs_an_anchor_and_observability():
-    assert engine.colour_of({"boundary_rms_m": 0.20, "anchor_rms_m": 0.3, "share": 0.65,
-                             "observable": True, "n_neighbours": 2, "method": "anchors",
-                             "ambiguous": False}) == "green"
+def test_colour_rule_green_needs_an_anchor_and_a_decisive_majority_or_clear_imagery():
+    base = {"boundary_rms_m": 0.20, "anchor_rms_m": 0.3, "share": 0.65, "observable": True,
+            "n_neighbours": 2, "method": "anchors", "ambiguous": False,
+            "support_m": 200.0, "support_next_m": 40.0}
+    assert engine.colour_of(base) == "amber", "two neighbours and a middling image: not enough"
+    assert engine.colour_of(dict(base, n_neighbours=3)) == "green"
+    assert engine.colour_of(dict(base, share=0.90)) == "green"
 
 
 def test_colour_rule_amber_when_only_one_condition_is_short():
     assert engine.colour_of({"boundary_rms_m": 0.20, "anchor_rms_m": 0.3, "share": 0.20,
-                             "observable": False, "n_neighbours": 1, "method": "anchors",
-                             "ambiguous": False}) == "amber"
+                             "observable": False, "n_neighbours": 2, "method": "anchors",
+                             "ambiguous": False, "support_m": 100.0,
+                             "support_next_m": 0.0}) == "amber"
 
 
 def test_colour_rule_red_for_an_ambiguous_image_pose():
@@ -106,7 +110,7 @@ def test_a_tie_between_poses_is_never_green():
     assert engine.colour_of(tie) == "amber"
     clear = dict(tie, support_m=271.0, support_next_m=29.0)
     assert engine.colour_of(clear) == "green"
-    imaged = dict(tie, share=0.75, observable=True)
+    imaged = dict(tie, share=0.90, observable=True)
     assert engine.colour_of(imaged) == "green", "clear imagery may break a geometric tie"
 
 
@@ -116,7 +120,9 @@ def test_a_pose_that_misses_a_printed_neighbour_is_red():
            "n_neighbours": 1, "method": "neighbour", "ambiguous": False,
            "support_m": 120.0, "support_next_m": 20.0, "printed_far": "46B,48A"}
     assert engine.colour_of(row) == "red"
-    assert engine.colour_of(dict(row, printed_far="")) != "red"
+    assert engine.colour_of(dict(row, printed_far="", n_neighbours=3)) == "green"
+    # 43B: its sheet names 42B, but the team placed 42B and 43B 20 m apart. One miss is a doubt.
+    assert engine.colour_of(dict(row, printed_far="42B", n_neighbours=3)) == "amber"
 
 
 def test_printed_contradictions_reads_the_transcription():
@@ -148,3 +154,17 @@ def test_overlap_ignores_a_strip_as_thin_as_the_anchors_disagree(tmp_path, monke
     neighbour_on_top = Polygon([(10, 5), (110, 5), (110, 20), (10, 20)])       # really on top
     assert engine._overlap("V", "A", pose, {"B": neighbour_2m_over}) <= engine.MAX_OVERLAP_SHARE
     assert engine._overlap("V", "A", pose, {"B": neighbour_on_top}) > engine.MAX_OVERLAP_SHARE
+
+
+def test_calibration_of_2026_09_19_holds():
+    """The 15 Kizhikaranai leave-one-out rows: every green within 2.7 m, the 16 m parcel red."""
+    good3 = {"boundary_rms_m": 0.884, "anchor_rms_m": 2.2, "share": 0.667, "observable": False,
+             "n_neighbours": 3, "method": "neighbour", "ambiguous": False,
+             "support_m": 125.0, "support_next_m": 0.0}
+    assert engine.colour_of(good3) == "green"                                   # 43A, 0.58 m
+    two = dict(good3, n_neighbours=2, boundary_rms_m=0.165, share=0.482, observable=True)
+    assert engine.colour_of(two) == "amber"                                     # 47B, 8.9 m
+    one = dict(good3, n_neighbours=1, boundary_rms_m=0.241, share=0.294, observable=True)
+    assert engine.colour_of(one) == "red"                                       # 40B, 16.4 m
+    imaged_two = dict(two, share=0.811, boundary_rms_m=2.059)
+    assert engine.colour_of(imaged_two) == "amber"                              # 48A, 4.1 m

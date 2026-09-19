@@ -101,9 +101,13 @@ Three rules override everything else:
 1. Reads your hand-placed parcels and recovers each one's pose from its `.points` file, or
    from the geometry when the points fit worse than 3 m.
 2. For each remaining sheet, walks its outline against every placed neighbour's outline,
-   comparing edge lengths and turn angles. Every matching run of edges gives a candidate pose.
-3. Drops candidates that sit on top of a placed parcel, then ranks the rest by how much
-   shared boundary they explain. The 180 degree twin of a rectangle loses here.
+   comparing edge lengths and turn angles. The walk stops at the corner where the two rings
+   turn different ways, which is where the shared boundary ends. Every matching run of edges
+   gives a candidate pose.
+3. Drops candidates that sit on top of a placed parcel (after shaving 3 m off both, because
+   hand placements disagree with each other by about that much), then ranks the rest by how
+   much shared boundary they explain. The 180 degree twin of a rectangle loses here, and a
+   pose that does not reach a parcel the sheet names as its neighbour ranks last.
 4. Offers the best three to the satellite edge search. A pose is accepted from imagery only
    when it beats the runner-up clearly and the parcel has edges in two directions.
 5. Adjusts all new parcels together, your parcels held fixed, so shared boundaries close.

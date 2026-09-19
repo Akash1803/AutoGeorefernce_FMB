@@ -80,6 +80,61 @@ printed neighbour numbers and frozen neighbours. Anchor constraints must be tole
 1–6 m non-rigidity. Thresholds must be calibrated on the production score, not on the spike's binary
 share (which is 0.14 at the spike's own tolerance under the Gaussian score).
 
+### 3.1 Calibration on the Kizhikaranai leave-one-out (2026-09-19)
+
+Harness: `autogeoref/evaluate.py`. Each of the 15 hand-placed parcels is hidden in turn on a copy
+of the village folder, the engine places it from the other 14, and the result is measured against
+the sheet at the team's own pose (rigid fit of the `.points` file, or of the geometry when that
+fit is worse than 3 m). Record: `_logs/leave_one_out_calibrated_35_04_077_20260919.csv`.
+
+| Survey | Error m | Heading err deg | Residual m | Neighbours | Runner-up / best | Colour |
+|---|---|---|---|---|---|---|
+| 40A | 1.08 | 2.30 | 2.36 | 2 | 1.00 | amber |
+| 40B | 16.41 | 6.64 | 0.24 | 1 | 1.00 | red |
+| 42A | 3.76 | 0.03 | 0.86 | 4 | 0.93 | amber |
+| 42B | 1.62 | 0.06 | 1.05 | 4 | 1.00 | amber |
+| 43A | 0.58 | 0.16 | 0.88 | 3 | 0.55 | green |
+| 43B | 1.91 | 0.31 | 0.34 | 3 | 0.33 | amber (names 42B, 20 m away) |
+| 46A | 1.80 | 0.10 | 0.85 | 2 | 1.00 | amber |
+| 46B | 1.52 | 0.98 | 0.57 | 3 | 0.00 | green |
+| 47A | 1.70 | 1.19 | 1.11 | 3 | 1.00 | amber |
+| 47B | 8.93 | 6.60 | 0.17 | 2 | 1.00 | amber |
+| 48A | 4.08 | 0.74 | 2.06 | 2 | 0.00 | amber |
+| 48B | 4.92 | 0.66 | 1.68 | 2 | 0.00 | amber |
+| 169 | 1.99 | 0.01 | 1.87 | 5 | 1.00 | amber |
+| 170 | 1.06 | 0.32 | 0.74 | 8 | 1.00 | amber |
+| 171 | 2.70 | 0.27 | 0.68 | 5 | 1.00 | amber |
+
+Within 3 m: 10 of 15. Within 5 m: 13 of 15. All three railway strips placed and oriented
+correctly. Greens: 2, worst 1.52 m. Reds: 1, the 16 m miss. No false green, no false red.
+
+What the numbers taught, and the rule that came out of them:
+
+- A near-zero residual is not evidence. Both misses (40B, 47B) have residuals under 0.25 m
+  and heading errors of 6.6 degrees: one short chain pins a line, and the solver satisfies it
+  exactly. Residual counts only together with support.
+- Every parcel with three or more supporting neighbours landed within 2.7 m except 42A
+  (3.76 m, and its runner-up scored 93 % of the winner). With two, 47B, 48A and 48B were 4 to
+  9 m out and looked no different from the good ones by any column. `GREEN_MIN_NEIGHBOURS = 3`.
+- A single neighbour with no image support is red (`40B`).
+- Satellite edges were observable on 3 of 15 parcels; the one they alone would have passed
+  (48A, share 0.81) was 4.1 m out. `GREEN_SHARE = 0.85`, `AMBER_SHARE = 0.45`, until a village
+  with clearer field edges says otherwise.
+- The runner-up for the tie test must be a materially different pose (5 m or 3 degrees away);
+  near-duplicates from other chains made support_next equal support on 13 of 15 rows.
+- The team's own placements disagree with each other by 1 to 3 m (anchor rms 0.19 to 3.05 m,
+  42B and 43B 20 m apart though the sheets name each other). Everything downstream tolerates
+  that band: overlap test after 3 m erosion, adjustment gate 8 m, one missed printed neighbour
+  is a doubt (amber), two are a contradiction (red).
+- Gap-weighted support (length discounted by residual gap) was tried for ranking and the tie
+  test and rejected: 9 of 15 placed and 1 green.
+
+Root causes fixed on the way, each with a regression test: observations handed to the solver
+in ground coordinates (46B carried 72 m); the chainage walk ignoring turn direction (46A's chain
+ran two edges past its boundary); the overlap filter rejecting every thin parcel's correct pose;
+Puvi supplying position and orientation (43A flipped). Full log in the project memory
+`autogeoref-accuracy-defects`.
+
 ## 4. Scope
 
 In scope: one village at a time; every buffer parcel with a sheet and no manual file; raster export;
