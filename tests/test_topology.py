@@ -1,5 +1,6 @@
 import pytest
 from shapely.geometry import Polygon
+from shapely.ops import unary_union
 
 from autogeoref import topology
 
@@ -85,3 +86,35 @@ def test_apply_to_parts_gives_a_filled_gap_to_the_bordering_plot():
     out = topology.apply_to_parts([({"poly_id": 1}, a1), ({"poly_id": 2}, a2)], fixed, original)
     assert out[1][2] == "filled" and out[1][1].area == pytest.approx(53.0, abs=0.01)
     assert out[0][1].equals(a1)
+
+
+def test_clean_merges_a_hairline_separated_strip_and_leaves_no_arc():
+    """The dual line and the curve of 2026-09-20: a filled strip 1 mm from its plot, round-capped."""
+    plot = Polygon([(0, 0), (30, 0), (30, 12), (0, 12)])
+    strip = Polygon([(30.001, 0), (30.4, 0), (30.4, 12), (30.001, 12)]).buffer(0.0)      # hairline gap
+    round_cap = Polygon([(30.0, 12.0), (30.4, 12.0), (30.4, 12.4)]).buffer(0.3)        # an arc on top
+    dirty = unary_union([plot, strip, round_cap])
+    got = topology.clean(unary_union([plot, strip]))
+    assert got.geom_type == "Polygon", "one ring, not a plot plus a sliver"
+    assert len(got.exterior.coords) <= 6, "a rectangle plus a strip is still four corners"
+    assert got.area == pytest.approx(30.4 * 12, abs=0.2)
+    got2 = topology.clean(dirty)
+    assert got2.geom_type == "Polygon"
+    assert len(got2.exterior.coords) < len(dirty.exterior.coords), "arc vertices are thinned"
+    assert got2.area == pytest.approx(dirty.area, rel=0.01)
+
+
+def test_clean_keeps_sharp_corners_and_untouched_shape():
+    tri = Polygon([(0, 0), (40, 0), (5, 25)])
+    got = topology.clean(tri)
+    assert got.area == pytest.approx(tri.area, rel=0.005)
+    assert len(got.exterior.coords) == 4
+
+
+def test_gap_fill_strips_have_straight_ends():
+    from shapely.geometry import Polygon as P
+    a = P([(0, 0), (10, 0), (10, 10), (0, 10)]); b = P([(10.3, 0), (20, 0), (20, 10), (10.3, 10)])
+    out, rep = topology.fix({"A": a, "B": b}, movable={"A", "B"}, rail=set())
+    filled = out["A"] if out["A"].area > a.area + 0.1 else out["B"]
+    assert len(filled.exterior.coords) == 5, "a rectangle plus a straight strip is still a rectangle"
+    assert filled.area == pytest.approx(100.0 + 3.0, abs=0.05)

@@ -18,6 +18,40 @@ MIN_AREA = 0.02          # square metres: smaller than this is numerical noise
 GUARD_FRACTION = 0.25    # refuse any edit that takes more than this share of a polygon
 
 
+MITRE = dict(join_style=2, mitre_limit=5.0)
+CLEAN_TOL = 0.02         # metres: hairline gaps closed, near-collinear vertices dropped
+MIN_WIDTH = 0.20         # metres: anything thinner than this is a sliver, not a plot
+
+
+def _mitre(geom, d):
+    return geom.buffer(d, **MITRE)
+
+
+def clean(geom, tol=CLEAN_TOL, min_width=MIN_WIDTH):
+    """Tidy a topology-edited polygon so it looks like a drawn parcel, not a computed one.
+
+    Closes hairline gaps between a filled strip and its plot (they otherwise draw as a double
+    line), removes needles thinner than `min_width`, keeps the largest piece, and drops the
+    near-collinear vertices that clipping leaves behind. Mitred buffers keep every real corner
+    sharp; opening a polygon by `min_width/2` and closing it again returns the original wherever
+    it is wider than `min_width`.
+    """
+    if geom is None or geom.is_empty:
+        return geom
+    g = geom.buffer(0)
+    g = _mitre(_mitre(g, tol), -tol)                          # close hairlines
+    opened = _mitre(_mitre(g, -min_width / 2.0), min_width / 2.0)   # remove needles
+    if not opened.is_empty and opened.area >= 0.98 * g.area:
+        g = opened
+    if g.geom_type == "MultiPolygon":
+        g = max(g.geoms, key=lambda p: p.area)
+    elif g.geom_type == "GeometryCollection":
+        polys = [p for p in g.geoms if p.geom_type in ("Polygon", "MultiPolygon")]
+        g = max(unary_union(polys).geoms, key=lambda p: p.area) if polys and unary_union(polys).geom_type == "MultiPolygon" else (unary_union(polys) if polys else Polygon())
+    g = g.simplify(tol, preserve_topology=True)
+    return g.buffer(0)
+
+
 def _largest(geom):
     """Repair a geometry without silently discarding parts of a multipolygon."""
     if geom is None or geom.is_empty:
@@ -105,7 +139,12 @@ def fix(geoms, movable, rail, gap_tol=1.20):
         d = out[a].distance(out[b])
         if d <= 0 or d > gap_tol:
             continue
-        strip = out[a].buffer(gap_tol).intersection(out[b].buffer(gap_tol)).difference(out[a]).difference(out[b])
+        # mitred buffers: round ones left arcs on the filled pieces (the curve Akash saw on 2026-09-20)
+        strip = (_mitre(out[a], gap_tol).intersection(_mitre(out[b], gap_tol))
+                 .difference(out[a]).difference(out[b]))
+        # only the part between the two parcels: the buffers also overlap in square "ears" past
+        # the ends of the gap, and those ears are not a gap
+        strip = strip.intersection(unary_union([out[a], out[b]]).convex_hull)
         for piece in (strip.geoms if strip.geom_type.startswith("Multi") else [strip]):
             if piece.is_empty or piece.area <= MIN_AREA or piece.length == 0:
                 continue
@@ -122,6 +161,10 @@ def fix(geoms, movable, rail, gap_tol=1.20):
             continue
         out[best] = _largest(unary_union([out[best], gap]))
         report["fills"].append([round(gap.area, 2), "into", best, kind])
+    edited = {r[0] for r in report["clips"]} | {r[2] for r in report["fills"]}
+    for key in edited:
+        if key in movable:
+            out[key] = clean(out[key])        # tidy only what was edited; anchors are never here
     return out, report
 
 
@@ -154,7 +197,9 @@ def apply_to_parts(parts, fixed_body, original_body):
             ng = unary_union([ng] + owner[k])
             note = (note + ",filled").strip(",")
         ng = _largest(ng)
-        if ng is None or ng.is_empty or ng.geom_type not in ("Polygon", "MultiPolygon"):
+        if note:
+            ng = clean(ng)                 # untouched plots stay exactly as the sheet drew them
+        if ng is None or ng.is_empty or ng.geom_type != "Polygon":
             ng, note = g, "kept (edit would empty the plot)"
         out.append((props, ng, note))
     return out
