@@ -212,22 +212,32 @@ if want and os.path.normcase(proj.fileName()) != os.path.normcase(want):
     print(json.dumps({"skipped": "a different project is open", "open": proj.fileName()}))
 else:
     root = proj.layerTreeRoot(); name = "Georef review - " + %r
-    old = root.findGroup(name)
-    if old:
-        for n in old.findLayers():
-            proj.removeMapLayer(n.layerId())
-        root.removeChildNode(old)
-    grp = QgsLayerTreeGroup(name); root.insertChildNode(0, grp); added = []
-    for path, colour, label in %s:
-        lyr = QgsVectorLayer(path + "|layername=parcels", label, "ogr")
-        if not lyr.isValid():
-            lyr = QgsVectorLayer(path, label, "ogr")
-        if not lyr.isValid():
-            continue
-        lyr.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(
-            {"color": colour + "40", "outline_color": colour, "outline_width": "0.6"})))
-        proj.addMapLayer(lyr, False); grp.addLayer(lyr); added.append(label)
-    print(json.dumps({"group": name, "layers": added}))
+    if root.findGroup(name) is not None:
+        # never remove live layers from the team's project (QGIS crashed doing that on 2026-09-20)
+        print(json.dumps({"skipped": "group already present; remove it by hand to reload", "group": name}))
+    else:
+        # the team's rule: automation is a red outline, exactly as thick as their own manual layers
+        width, unit = "0.35", "MM"
+        for l in proj.mapLayers().values():
+            if isinstance(l, QgsVectorLayer) and "_parcels_modified" in l.name() and l.renderer() is not None:
+                try:
+                    pr = l.renderer().symbol().symbolLayer(0).properties()
+                    width = pr.get("outline_width", width); unit = pr.get("outline_width_unit", unit)
+                    break
+                except Exception:
+                    pass
+        grp = QgsLayerTreeGroup(name); root.insertChildNode(0, grp); added = []
+        for path, colour, label in %s:
+            lyr = QgsVectorLayer(path + "|layername=parcels", label, "ogr")
+            if not lyr.isValid():
+                lyr = QgsVectorLayer(path, label, "ogr")
+            if not lyr.isValid():
+                continue
+            lyr.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(
+                {"style": "no", "outline_color": "#ff0000", "outline_width": str(width),
+                 "outline_width_unit": unit})))
+            proj.addMapLayer(lyr, False); grp.addLayer(lyr); added.append(label)
+        print(json.dumps({"group": name, "layers": added, "outline_width": width, "unit": unit}))
 """
 
 
@@ -235,8 +245,8 @@ def build_group(village, rows, project_path=None):
     """Load the run's outputs into QGIS. Never fatal: files and CSVs are written regardless."""
     if not qgis_bridge.available():
         return {"skipped": "QGIS not reachable; rerun with --review when QGIS is open"}
-    spec = [(str(paths.output_path(village, r["survey"])), COLOURS.get(r.get("colour"), "#888888"),
-             "%s (%s)" % (r["survey"], r.get("colour", "")))
+    spec = [(str(paths.output_path(village, r["survey"])), "#ff0000",
+             "%s auto [%s]" % (r["survey"], r.get("colour", "")))
             for r in rows if paths.output_path(village, r["survey"]).exists()]
     try:
         return qgis_bridge.json_result(_GROUP % (project_path or "", village, json.dumps(spec)))
