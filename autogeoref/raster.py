@@ -5,6 +5,7 @@ https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z} in EPSG:3857. rasterio reads 
 WMS/TMS driver given the XML description below, so no screenshot and no ECW writer are needed.
 """
 import datetime
+import time
 import hashlib
 import json
 import shutil
@@ -27,8 +28,13 @@ TILE_XML = """<GDAL_WMS>
   <Projection>EPSG:3857</Projection>
   <BlockSizeX>256</BlockSizeX><BlockSizeY>256</BlockSizeY><BandsCount>3</BandsCount>
   <MaxConnections>4</MaxConnections>
+  <Timeout>60</Timeout>
+  <ZeroBlockHttpCodes>204,403,404,429,500,502,503,504</ZeroBlockHttpCodes>
+  <ZeroBlockOnServerException>true</ZeroBlockOnServerException>
 </GDAL_WMS>
 """
+READ_ATTEMPTS = 3          # one refused tile must not abort a 300 m window (2026-09-20)
+MAX_EMPTY_SHARE = 0.02     # more empty pixels than this and the export is refused, not pinned
 
 
 def _sha256(path):
@@ -51,14 +57,29 @@ def export(village, bounds, zoom=20, resolution=0.15, run_id=None):
     height = int(round((maxy - miny) / resolution))
     dst_tr = from_origin(minx, maxy, resolution, resolution)
     dst = np.zeros((3, height, width), np.uint8)
-    with rasterio.open(str(desc)) as src:
-        win = src.window(*transform_bounds("EPSG:32644", src.crs, minx, miny, maxx, maxy))
-        win = win.round_offsets().round_lengths()
-        arr = src.read(window=win)
-        src_tr = src.window_transform(win)
-        for band in range(3):
-            reproject(arr[band], dst[band], src_transform=src_tr, src_crs=src.crs,
-                      dst_transform=dst_tr, dst_crs="EPSG:32644", resampling=Resampling.bilinear)
+    last = None
+    for attempt in range(READ_ATTEMPTS):
+        try:
+            with rasterio.open(str(desc)) as src:
+                win = src.window(*transform_bounds("EPSG:32644", src.crs, minx, miny, maxx, maxy))
+                win = win.round_offsets().round_lengths()
+                arr = src.read(window=win)
+                src_tr = src.window_transform(win)
+                src_crs = src.crs
+            empty = float((arr.max(axis=0) == 0).mean())
+            if empty <= MAX_EMPTY_SHARE:
+                break
+            last = RuntimeError("%.1f %% of the window came back empty" % (100 * empty))
+        except Exception as exc:                      # a refused tile, a dropped connection
+            last = exc
+        time.sleep(3.0 * (attempt + 1))
+    else:
+        raise RuntimeError("satellite export failed after %d attempts: %s" % (READ_ATTEMPTS, last))
+    for band in range(3):
+        reproject(arr[band], dst[band], src_transform=src_tr, src_crs=src_crs,
+                  dst_transform=dst_tr, dst_crs="EPSG:32644", resampling=Resampling.bilinear)
+    if float((dst.max(axis=0) == 0).mean()) > MAX_EMPTY_SHARE:
+        raise RuntimeError("satellite window is empty after resampling; nothing pinned")
     stamp = run_id or datetime.datetime.now().strftime("%Y%m%d")
     out = out_dir / ("satellite_z%d_%s.tif" % (zoom, stamp))
     previous = pinned(village)

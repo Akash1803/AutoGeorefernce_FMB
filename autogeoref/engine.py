@@ -54,6 +54,7 @@ LINE_STEP_M = 2.0            # metres between boundary samples that become line 
 LINE_DEG = 15.0              # the neighbour's edge must run within this of the sample's own edge
 SIGMA_LINE = 0.60            # metres; many samples per edge, so each one is weighted loosely
 ADJUST_ROUNDS = 3            # rebuild the observations from the adjusted poses and solve again
+WINDOW_MARGIN_M = 40.0       # satellite window: the placed parcels' extent plus this on every side
 
 
 def colour_of(row):
@@ -503,44 +504,13 @@ def _decisive(row):
     return best > 0 and nxt <= SUPPORT_MARGIN * best
 
 
-def run(village, do_raster=False, do_topology=False, do_review=True, project=None, only=None,
-        raster_bounds=None):
-    """Steps 1-13 of spec section 5. Returns a summary dict; details go to georef_status.csv.
+def _place_all(village, todo, stamp, placed, bodies, anchor_map, index):
+    """The placement passes: propose every pending sheet, commit the certain ones, refine, repeat.
 
-    `only`: place just these surveys (the ring around a seed); everything else is left alone.
-    `raster_bounds`: export the satellite window for these EPSG:32644 bounds instead of the
-    whole village. A small window keeps the tile reprojection error local (Akash, 2026-09-20).
+    `placed` and `bodies` are updated in place. Returns {"rows": [...], "bodies": {survey: body}}
+    for the sheets placed here (anchors excluded).
     """
-    run_id = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    stamp = datetime.datetime.now().isoformat(timespec="seconds")
-    tool_fps = review.tool_written_fingerprints(village)
-    anchor_map = anchors.load_anchors(village, tool_fps)
-    conflicts = anchors.anchor_conflicts(village, anchor_map)
-    superseded = {s: paths.manual_files(village, s)[1:] for s in anchor_map}
-    anchors.write_anchors_csv(village, anchor_map, superseded, conflicts)
-
-    todo = [s for s in paths.surveys_with_sheets(village) if s not in anchor_map]
-    if only is not None:
-        only = {str(s) for s in only}
-        todo = [s for s in todo if s in only]
-    placed = {s: (a.theta, a.t) for s, a in anchor_map.items()}
     rows = []
-
-    if todo and (do_raster or raster.pinned(village) is None):
-        if raster_bounds is not None:
-            raster.export(village, tuple(raster_bounds), run_id=run_id)
-        else:
-            geoms = [anchors.placed_geometry(village, a) for a in anchor_map.values()]
-            geoms = [g for g in geoms if g is not None and not g.is_empty]
-            if geoms:
-                b = unary_union(geoms).bounds
-                raster.export(village, (b[0] - 100, b[1] - 100, b[2] + 100, b[3] + 100), run_id=run_id)
-
-    index = None
-    if todo and raster.pinned(village) is not None:
-        index = edgemod.SegmentIndex(edgemod.detect(raster.pinned(village)["path"], min_len_m=3.0))
-
-    bodies = placed_bodies(village, placed)
     # Placement grows outward in passes: a sheet whose neighbours are not on the ground yet is
     # retried after they are. With one fixed parcel (48A on 2026-09-19) the whole village is
     # reached in a handful of passes; a sheet nothing ever reaches ends as "waiting".
@@ -591,6 +561,71 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
                              "colour": "red", "confidence": 0, "status": "waiting",
                              "notes": "no placed neighbour shares a boundary (after %d passes)" % pass_no})
             break
+    return {"rows": rows, "bodies": {s: bodies[s] for s in bodies if s in todo}}
+
+def run(village, do_raster=False, do_topology=False, do_review=True, project=None, only=None,
+        raster_bounds=None):
+    """Steps 1-13 of spec section 5. Returns a summary dict; details go to georef_status.csv.
+
+    `only`: place just these surveys (the ring around a seed); everything else is left alone.
+    `raster_bounds`: export the satellite window for these EPSG:32644 bounds instead of the
+    whole village. A small window keeps the tile reprojection error local (Akash, 2026-09-20).
+    """
+    run_id = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    stamp = datetime.datetime.now().isoformat(timespec="seconds")
+    tool_fps = review.tool_written_fingerprints(village)
+    anchor_map = anchors.load_anchors(village, tool_fps)
+    conflicts = anchors.anchor_conflicts(village, anchor_map)
+    superseded = {s: paths.manual_files(village, s)[1:] for s in anchor_map}
+    anchors.write_anchors_csv(village, anchor_map, superseded, conflicts)
+
+    todo = [s for s in paths.surveys_with_sheets(village) if s not in anchor_map]
+    if only is not None:
+        only = {str(s) for s in only}
+        todo = [s for s in todo if s in only]
+    placed = {s: (a.theta, a.t) for s, a in anchor_map.items()}
+    rows = []
+
+    auto_window = raster_bounds == "auto"
+    if auto_window:
+        # Sized from where the ring lands, not from the seed: around 48A alone the window missed
+        # the far end of the 300 m strip 171 and its GCPs there had no imagery (Akash, 2026-09-20).
+        pre = _place_all(village, todo, stamp, dict(placed), placed_bodies(village, placed), anchor_map, None)
+        geoms = [b for s, b in pre["bodies"].items()] + [anchors.placed_geometry(village, a) for a in anchor_map.values()]
+        geoms = [g for g in geoms if g is not None and not g.is_empty]
+        b = unary_union(geoms).bounds
+        raster_bounds = (b[0] - WINDOW_MARGIN_M, b[1] - WINDOW_MARGIN_M, b[2] + WINDOW_MARGIN_M, b[3] + WINDOW_MARGIN_M)
+        do_raster = True
+    if todo and (do_raster or raster.pinned(village) is None):
+        if raster_bounds is not None:
+            raster.export(village, tuple(raster_bounds), run_id=run_id)
+        else:
+            geoms = [anchors.placed_geometry(village, a) for a in anchor_map.values()]
+            geoms = [g for g in geoms if g is not None and not g.is_empty]
+            if geoms:
+                b = unary_union(geoms).bounds
+                raster.export(village, (b[0] - 100, b[1] - 100, b[2] + 100, b[3] + 100), run_id=run_id)
+
+    index = None
+    if todo and raster.pinned(village) is not None:
+        index = edgemod.SegmentIndex(edgemod.detect(raster.pinned(village)["path"], min_len_m=3.0))
+
+    bodies = placed_bodies(village, placed)
+    result = _place_all(village, todo, stamp, placed, bodies, anchor_map, index)
+    rows.extend(result["rows"])
+    if index is not None:
+        # every placed parcel must lie inside the satellite window, or its GCPs are guesses
+        pin = raster.pinned(village)
+        rb = pin.get("bounds_32644") if pin else None
+        if rb:
+            for row in rows:
+                b = bodies.get(row["survey"])
+                if b is not None and not (b.bounds[0] >= rb[0] and b.bounds[1] >= rb[1]
+                                          and b.bounds[2] <= rb[2] and b.bounds[3] <= rb[3]):
+                    row["notes"] = " | ".join(x for x in (row.get("notes"), "outside the satellite window") if x)
+                    row["in_window"] = False
+                else:
+                    row["in_window"] = True
 
     # block adjustment: anchors fixed, everything else free. Observations are rebuilt from the
     # adjusted poses and the solve repeated, so an edge that was out of reach at first (47B's far

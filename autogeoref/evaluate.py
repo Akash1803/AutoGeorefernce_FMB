@@ -14,7 +14,7 @@ import shutil
 
 import numpy as np
 
-from . import anchors, engine, fit, neighbours, paths, review, sheets
+from . import anchors, engine, fit, neighbours, paths, raster, review, sheets
 
 REPORT_ONLY_RMS = 3.0
 
@@ -213,18 +213,7 @@ def seed_run(village, seeds, do_topology=True, label=None, rings=None, raster_ma
     raster_bounds = None
     if rings is not None:
         only = ring_around(village, seeds, rings)
-        # a satellite window just around the seed and its ring, not the whole village
-        seed_bodies = []
-        for s in seeds:
-            tr = truth_pose(village, s)
-            if tr is not None:
-                seed_bodies.append(_sheet_at(village, s, tr["theta"], tr["t"]))
-        if seed_bodies:
-            from shapely.ops import unary_union
-            b = unary_union(seed_bodies).bounds
-            # neighbours the ring may reach lie within roughly one parcel width of the seed
-            m = raster_margin_m + 0.5 * max(b[2] - b[0], b[3] - b[1])
-            raster_bounds = (b[0] - m, b[1] - m, b[2] + m, b[3] + m)
+        raster_bounds = "auto"       # sized from where the ring lands, once it has been placed
     try:
         paths.PROJECT = work
         neighbours._CACHE.pop(village, None)
@@ -234,6 +223,8 @@ def seed_run(village, seeds, do_topology=True, label=None, rings=None, raster_ma
                 pin.unlink()                    # force a fresh, local export in the work copy
         summary = engine.run(village, do_raster=raster_bounds is not None, do_topology=do_topology,
                              do_review=False, only=only, raster_bounds=raster_bounds)
+        pin = raster.pinned(village)
+        summary["raster_bounds"] = pin.get("bounds_32644") if pin else None
         summary["only"] = only
         rows = review.read_status(village)
         for r in rows:
