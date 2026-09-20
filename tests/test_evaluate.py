@@ -63,3 +63,12 @@ def test_leave_one_out_runs_on_a_copy_and_never_touches_the_project():
     assert before == after, "the harness must work on a copy"
     assert out and set(out[0]) >= {"survey", "colour", "centroid_error_m", "heading_error_deg",
                                    "passed"}
+
+
+def test_ring_around_a_seed_uses_the_printed_neighbours_both_ways():
+    if not paths.vector_dir(VILLAGE).exists():
+        pytest.skip("village not present")
+    ring1 = evaluate.ring_around(VILLAGE, ["48A"], rings=1)
+    assert "47B" in ring1 and "171" in ring1 and "48A" not in ring1
+    ring2 = evaluate.ring_around(VILLAGE, ["48A"], rings=2)
+    assert set(ring1) < set(ring2)

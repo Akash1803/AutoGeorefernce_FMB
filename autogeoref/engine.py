@@ -48,6 +48,7 @@ IMAGE_TOP_N = 3              # imagery is asked to confirm the best neighbour-ra
 SUPPORT_MARGIN = 0.80        # the runner-up pose must explain less than this share of the best
                              # pose's boundary, or the neighbours have not really chosen
 PRINTED_REACH_M = 10.0       # a placed parcel the sheet names as a neighbour must be this close
+SIDE_COS = 0.38              # a neighbour must lie within 67.5 degrees of the side the sheet prints it on
 
 
 def colour_of(row):
@@ -55,8 +56,11 @@ def colour_of(row):
     if row.get("method") == "puvi-only":
         return "red"
     far = [x for x in str(row.get("printed_far") or "").split(",") if x]
-    if len(far) >= 2:
-        # the sheet names neighbours that are on the ground, and the pose reaches none of them
+    contra = row.get("contradictions")
+    if contra is None:
+        contra = len(far) + (row.get("side_bad") or 0)
+    if contra >= 2:
+        # the sheets name neighbours and sides that this pose does not honour
         return "red"
     if rms is not None and rms > MAX_RESIDUAL_M:
         # 43A landed 971 m out on 2026-09-18 with a 27.6 m boundary residual and still read amber,
@@ -79,9 +83,12 @@ def colour_of(row):
         # 40B, 2026-09-19: one neighbour, residual 0.24 m, 16 m out. One chain pins a line, not
         # a parcel, and nothing else vouched for it.
         return "red"
-    if far:
+    if contra:
         return "amber" if (anchored or strong_image or weak_image) else "red"
-    if anchored and ((strong_image and n >= 2) or (decisive and n >= GREEN_MIN_NEIGHBOURS)):
+    tied_to_team = (row.get("anchor_partners") if row.get("anchor_partners") is not None else n) >= 1
+    if anchored and tied_to_team and ((strong_image and n >= 2) or (decisive and n >= GREEN_MIN_NEIGHBOURS)):
+        # 47B read green at 126 m on 2026-09-19 with three "neighbours" that were all placed in the
+        # same pass from the same wrong guess; green needs a direct tie to the team's own work
         return "green"
     if anchored or strong_image or weak_image:
         return "amber"
@@ -288,6 +295,52 @@ def printed_contradictions(village, survey, pose, bodies, reach_m=PRINTED_REACH_
     return sorted(far, key=paths.survey_sort_key)
 
 
+def side_checks(village, survey, pose, placed, bodies):
+    """(honoured, contradicted): the compass sides the sheets print, read both ways.
+
+    The sheet under placement says on which side each printed neighbour lies, and every placed
+    neighbour's own sheet says on which side this survey lies. Sides are in the sheet's drawn
+    frame, so they turn with the pose. From a single fixed parcel this is the only evidence that
+    tells which edge of the anchor a neighbour attaches to: on 2026-09-19, seeded with 48A alone,
+    47B took a wrong edge and every later parcel followed it hundreds of metres away.
+    """
+    body = unary_union([fit.apply_pose(g, pose[0], pose[1])
+                        for _p, g in sheets.load_sheet(village, survey)])
+    c0 = np.array(body.centroid.coords[0])
+    ok = bad = 0
+
+    def rot(theta):
+        th = math.radians(theta)
+        return np.array([[math.cos(th), -math.sin(th)], [math.sin(th), math.cos(th)]])
+
+    R = rot(pose[0])
+    for o in neighbours.printed(village, survey):
+        letters = neighbours.side(village, survey, o)
+        if o == survey or o not in bodies or not letters:
+            continue
+        act = np.array(bodies[o].centroid.coords[0]) - c0
+        n = float(np.linalg.norm(act))
+        if n < 1.0:
+            continue
+        if float((R @ np.array(neighbours.side_vector(letters))) @ act) / n >= SIDE_COS:
+            ok += 1
+        else:
+            bad += 1
+    for o, (th_o, _t_o) in placed.items():
+        letters = neighbours.side(village, o, survey)
+        if o == survey or o not in bodies or not letters:
+            continue
+        act = c0 - np.array(bodies[o].centroid.coords[0])
+        n = float(np.linalg.norm(act))
+        if n < 1.0:
+            continue
+        if float((rot(th_o) @ np.array(neighbours.side_vector(letters))) @ act) / n >= SIDE_COS:
+            ok += 1
+        else:
+            bad += 1
+    return ok, bad
+
+
 def rank_poses(village, survey, candidates, placed, anchor_map, bodies=None):
     """Candidates that do not eat a neighbour, best-supported first: [(support_m, partners, pose)].
 
@@ -301,8 +354,10 @@ def rank_poses(village, survey, candidates, placed, anchor_map, bodies=None):
             continue
         _obs, supported, partners = neighbour_chains(village, survey, pose, placed, anchor_map)
         far = printed_contradictions(village, survey, pose, bodies)
-        scored.append((supported, len(partners), pose, len(far)))
-    scored.sort(key=lambda s: (s[3], -s[0], -s[1]))
+        s_ok, s_bad = side_checks(village, survey, pose, placed, bodies)
+        scored.append((supported, len(partners), pose, len(far) + s_bad, s_ok))
+    # contradictions first (fewest), then support, then how many printed sides agree
+    scored.sort(key=lambda s: (s[3], -s[0], -s[4], -s[1]))
     return [(s[0], s[1], s[2]) for s in scored], [s[3] for s in scored]
 
 
@@ -342,8 +397,67 @@ def choose_pose(village, survey, candidates, placed, anchor_map, image=None, ran
     return best[2], note
 
 
-def run(village, do_raster=False, do_topology=False, do_review=True, project=None):
-    """Steps 1-13 of spec section 5. Returns a summary dict; details go to georef_status.csv."""
+def _place_one(village, survey, stamp, placed, bodies, anchor_map, index, pass_no):
+    """Propose a pose for one sheet from what is on the ground now: (row, pose or None)."""
+    row = {"survey": survey, "run": stamp, "method": "puvi-only", "ambiguous": False,
+           "notes": "", "n_neighbours": 0, "file": paths.output_path(village, survey).name}
+    cands = dedupe_poses(pose_candidates(village, survey, placed))
+    poses = [(c["theta"], c["t"]) for c in cands]
+    row["n_candidates"] = len(poses)
+    ranked, far_counts = rank_poses(village, survey, poses, placed, anchor_map, bodies)
+    image_pose = None
+    if index is not None and ranked:
+        pts, brg = sheets.sample_outline(sheets.outline(sheets.load_sheet(village, survey)), 1.0)
+        res = align.search(pts, brg, index, [p for _s, _n, p in ranked[:IMAGE_TOP_N]])
+        row.update({"share": round(res.share, 3), "margin": round(res.margin, 3),
+                    "observable": res.observable, "ambiguous": res.ambiguous, "notes": res.note})
+        if not res.ambiguous and res.observable:
+            image_pose = (res.theta, res.t)
+    pose, why = choose_pose(village, survey, poses, placed, anchor_map, image=image_pose,
+                            ranked=ranked)
+    row["support_m"] = round(ranked[0][0], 1) if ranked else 0.0
+    row["support_next_m"] = round(_runner_up(village, survey, ranked), 1) if ranked else 0.0
+    if pose is not None:
+        far = printed_contradictions(village, survey, pose, bodies)
+        s_ok, s_bad = side_checks(village, survey, pose, placed, bodies)
+        row["printed_far"] = ",".join(far)
+        row["side_ok"], row["side_bad"] = s_ok, s_bad
+        row["contradictions"] = len(far) + s_bad
+        if far:
+            row["notes"] = " | ".join(x for x in (row.get("notes"),
+                                                   "does not reach printed neighbour(s) " + ",".join(far)) if x)
+        if s_bad:
+            row["notes"] = " | ".join(x for x in (row.get("notes"),
+                                                   "%d printed side(s) contradicted" % s_bad) if x)
+    row["notes"] = " | ".join(x for x in (row.get("notes"), why) if x)
+    if pose is not None:
+        row["method"] = "image" if (image_pose is not None and pose is image_pose) else "neighbour"
+    if pose is None:
+        return dict(row, colour="red", confidence=0, status="waiting"), None
+    row["heading_deg"] = round(pose[0], 3)
+    row["pass"] = pass_no
+    return row, pose
+
+
+def _commit(village, survey, pose, placed, bodies):
+    placed[survey] = pose
+    bodies[survey] = unary_union([fit.apply_pose(g, pose[0], pose[1])
+                                  for _p, g in sheets.load_sheet(village, survey)])
+
+
+def _decisive(row):
+    best, nxt = row.get("support_m") or 0.0, row.get("support_next_m") or 0.0
+    return best > 0 and nxt <= SUPPORT_MARGIN * best
+
+
+def run(village, do_raster=False, do_topology=False, do_review=True, project=None, only=None,
+        raster_bounds=None):
+    """Steps 1-13 of spec section 5. Returns a summary dict; details go to georef_status.csv.
+
+    `only`: place just these surveys (the ring around a seed); everything else is left alone.
+    `raster_bounds`: export the satellite window for these EPSG:32644 bounds instead of the
+    whole village. A small window keeps the tile reprojection error local (Akash, 2026-09-20).
+    """
     run_id = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
     stamp = datetime.datetime.now().isoformat(timespec="seconds")
     tool_fps = review.tool_written_fingerprints(village)
@@ -353,60 +467,65 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
     anchors.write_anchors_csv(village, anchor_map, superseded, conflicts)
 
     todo = [s for s in paths.surveys_with_sheets(village) if s not in anchor_map]
+    if only is not None:
+        only = {str(s) for s in only}
+        todo = [s for s in todo if s in only]
     placed = {s: (a.theta, a.t) for s, a in anchor_map.items()}
     rows = []
 
     if todo and (do_raster or raster.pinned(village) is None):
-        geoms = [anchors.placed_geometry(village, a) for a in anchor_map.values()]
-        geoms = [g for g in geoms if g is not None and not g.is_empty]
-        if geoms:
-            b = unary_union(geoms).bounds
-            raster.export(village, (b[0] - 100, b[1] - 100, b[2] + 100, b[3] + 100), run_id=run_id)
+        if raster_bounds is not None:
+            raster.export(village, tuple(raster_bounds), run_id=run_id)
+        else:
+            geoms = [anchors.placed_geometry(village, a) for a in anchor_map.values()]
+            geoms = [g for g in geoms if g is not None and not g.is_empty]
+            if geoms:
+                b = unary_union(geoms).bounds
+                raster.export(village, (b[0] - 100, b[1] - 100, b[2] + 100, b[3] + 100), run_id=run_id)
 
     index = None
     if todo and raster.pinned(village) is not None:
         index = edgemod.SegmentIndex(edgemod.detect(raster.pinned(village)["path"], min_len_m=3.0))
 
     bodies = placed_bodies(village, placed)
-    for survey in todo:
-        row = {"survey": survey, "run": stamp, "method": "puvi-only", "ambiguous": False,
-               "notes": "", "n_neighbours": 0, "file": paths.output_path(village, survey).name}
-        cands = dedupe_poses(pose_candidates(village, survey, placed))
-        poses = [(c["theta"], c["t"]) for c in cands]
-        row["n_candidates"] = len(poses)
-        ranked, far_counts = rank_poses(village, survey, poses, placed, anchor_map, bodies)
-        image_pose = None
-        if index is not None and ranked:
-            pts, brg = sheets.sample_outline(sheets.outline(sheets.load_sheet(village, survey)), 1.0)
-            res = align.search(pts, brg, index, [p for _s, _n, p in ranked[:IMAGE_TOP_N]])
-            row.update({"share": round(res.share, 3), "margin": round(res.margin, 3),
-                        "observable": res.observable, "ambiguous": res.ambiguous, "notes": res.note})
-            if not res.ambiguous and res.observable:
-                image_pose = (res.theta, res.t)
-        pose, why = choose_pose(village, survey, poses, placed, anchor_map, image=image_pose,
-                                ranked=ranked)
-        row["support_m"] = round(ranked[0][0], 1) if ranked else 0.0
-        row["support_next_m"] = round(_runner_up(village, survey, ranked), 1) if ranked else 0.0
-        if pose is not None:
-            far = printed_contradictions(village, survey, pose, bodies)
-            row["printed_far"] = ",".join(far)
-            if far:
-                row["notes"] = " | ".join(x for x in (row.get("notes"),
-                                                       "does not reach printed neighbour(s) " + ",".join(far)) if x)
-        row["notes"] = " | ".join(x for x in (row.get("notes"), why) if x)
-        if pose is not None:
-            row["method"] = "image" if (image_pose is not None and pose is image_pose) else "neighbour"
-        if pose is None:
-            rows.append(dict(row, colour="red", confidence=0, status="waiting",
-                             notes=(row["notes"] + " | no placed neighbour shares a boundary").strip(" |")))
-            continue
-        row["heading_deg"] = round(pose[0], 3)
-        placed[survey] = pose
-        bodies[survey] = unary_union([fit.apply_pose(g, pose[0], pose[1])
-                                      for _p, g in sheets.load_sheet(village, survey)])
-        rows.append(row)
+    # Placement grows outward in passes: a sheet whose neighbours are not on the ground yet is
+    # retried after they are. With one fixed parcel (48A on 2026-09-19) the whole village is
+    # reached in a handful of passes; a sheet nothing ever reaches ends as "waiting".
+    # Within a pass every pending sheet is proposed against the same ground, then only the
+    # certain ones are committed: no contradiction with the printed neighbours and sides, and a
+    # clear winner over the runner-up. If none is certain, the single best-supported proposal is
+    # committed so the village keeps growing; the colour rule will mark it for review.
+    pending, pass_no = list(todo), 0
+    while pending:
+        pass_no += 1
+        proposals = []
+        for survey in pending:
+            row, pose = _place_one(village, survey, stamp, placed, bodies, anchor_map, index, pass_no)
+            if pose is not None:
+                proposals.append((row, pose))
+        certain = [(r, p) for r, p in proposals if (r.get("contradictions") or 0) == 0 and _decisive(r)]
+        chosen = certain or sorted(proposals, key=lambda rp: ((rp[0].get("contradictions") or 0),
+                                                              -(rp[0].get("support_m") or 0)))[:1]
+        chosen.sort(key=lambda rp: -(rp[0].get("support_m") or 0))
+        placed_this_pass = []
+        for row, pose in chosen:
+            if _overlap(village, row["survey"], pose, bodies) > MAX_OVERLAP_SHARE:
+                continue                       # collides with a sheet committed earlier this pass
+            _commit(village, row["survey"], pose, placed, bodies)
+            row["certain"] = (row, pose) in certain
+            rows.append(row)
+            placed_this_pass.append(row["survey"])
+        pending = [s for s in pending if s not in placed_this_pass]
+        if not placed_this_pass:
+            for survey in pending:
+                rows.append({"survey": survey, "run": stamp, "method": "puvi-only", "ambiguous": False,
+                             "n_neighbours": 0, "file": paths.output_path(village, survey).name,
+                             "colour": "red", "confidence": 0, "status": "waiting",
+                             "notes": "no placed neighbour shares a boundary (after %d passes)" % pass_no})
+            break
 
     # block adjustment: anchors fixed, everything else free
+
     free = {s: placed[s] for s in todo if s in placed}
     pair_obs, line_obs, gcp_obs, priors = [], [], [], []
     for s in free:
@@ -434,6 +553,7 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
         row["n_neighbours"] = len(partners)
         row["neighbours"] = ",".join(partners)
         row["anchor_rms_m"] = max([anchor_map[n].rms for n in partners if n in anchor_map] or [0.0])
+        row["anchor_partners"] = sum(1 for n in partners if n in anchor_map)
         row["shift_m"] = round(adjusted[s]["shift_m"], 2)
         row["sigma_pos_m"] = round(adjusted[s]["sigma_pos_m"], 3)
         row["sigma_head_deg"] = round(adjusted[s]["sigma_head_deg"], 3)
@@ -458,8 +578,13 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
                                  for _p, g in sheets.load_sheet(village, s)]) for s in written}
         geoms.update({s: anchors.placed_geometry(village, a) for s, a in anchor_map.items()})
         rail = {s for s in geoms if s in _rail_parcels(village)}
-        _fixed, report = topology.fix(geoms, movable=set(written), rail=rail)
+        fixed, report = topology.fix(geoms, movable=set(written), rail=rail)
         topology.report_rail_conflicts(village, report)
+        edited = write_topology(village, written, adjusted, geoms, fixed)
+        for row in rows:
+            if row["survey"] in edited:
+                row["notes"] = " | ".join(x for x in (row.get("notes"), "topology: " + edited[row["survey"]]) if x)
+                row["fp_placed"] = anchors.fingerprint(paths.output_path(village, row["survey"]))
 
     for row in rows:
         if row.get("fp_placed"):
@@ -470,6 +595,46 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
     return {"village": village, "anchors": len(anchor_map), "placed": len(written),
             "waiting": sum(1 for r in rows if r.get("status") == "waiting"),
             "conflicts": len(conflicts), "run": run_id, "rows": rows}
+
+
+def write_topology(village, written, adjusted, original, fixed):
+    """Rewrite the parcels layer of each tool-written file with its topology-fixed plots.
+
+    The edges layer is left as the rigid sheet: the printed FMB lengths are the point of it.
+    Anchors are never in `written`, so the team's files are never touched here.
+    Returns {survey: summary} for the surveys whose geometry changed.
+    """
+    edited = {}
+    for s in written:
+        if s not in fixed or fixed[s].equals(original[s]):
+            continue
+        theta, t = adjusted[s]["theta"], adjusted[s]["t"]
+        parts = [(props, fit.apply_pose(g, theta, t)) for props, g in sheets.load_sheet(village, s)]
+        new_parts = topology.apply_to_parts(parts, fixed[s], original[s])
+        notes = sorted({n for _p, _g, n in new_parts if n})
+        if not notes:
+            continue
+        target = paths.output_path(village, s)
+        old = gpd.read_file(target, layer="parcels")
+        geoms_by_id = {}
+        for (props, g, n) in new_parts:
+            geoms_by_id[(props.get("poly_id"), props.get("plot_no"))] = (g, n)
+        new_geom, topo = [], []
+        for _, r in old.iterrows():
+            g, n = geoms_by_id.get((r.get("poly_id"), r.get("plot_no")), (r.geometry, ""))
+            new_geom.append(g); topo.append(n or "clean")
+        old = old.set_geometry(new_geom)
+        old["topo_edit"] = topo
+        old["area_sqm"] = old.geometry.area.round(3)
+        old["perimeter_m"] = old.geometry.length.round(3)
+
+        def writer(path):
+            old.to_file(path, layer="parcels", driver="GPKG")
+            gpd.read_file(target, layer="edges").to_file(path, layer="edges", driver="GPKG")
+
+        if files.safe_write(target, writer):
+            edited[s] = ",".join(notes)
+    return edited
 
 
 def _crs_wkt():

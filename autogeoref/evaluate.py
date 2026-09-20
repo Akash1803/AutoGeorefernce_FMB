@@ -150,6 +150,109 @@ def leave_one_out(village, surveys=None, mode="full", keep_work=True):
     return results
 
 
+def ring_around(village, seeds, rings=1):
+    """Surveys reachable from the seeds through the printed-neighbour lists in `rings` steps."""
+    have = set(paths.surveys_with_sheets(village))
+    frontier, reached = {str(s) for s in seeds}, set()
+    for _ in range(rings):
+        nxt = set()
+        for s in frontier:
+            for o in neighbours.printed(village, s):
+                if o in have and o not in reached and o not in seeds:
+                    nxt.add(o)
+            for o in have:
+                if s in neighbours.printed(village, o) and o not in reached and o not in seeds:
+                    nxt.add(o)
+        reached |= nxt
+        frontier = nxt
+    return sorted(reached, key=paths.survey_sort_key)
+
+
+def seed_run(village, seeds, do_topology=True, label=None, rings=None, raster_margin_m=60.0):
+    """Keep only `seeds` as hand-placed parcels on a copy of the village and place everything
+    else from them. This is the rollout situation: a village with one or two seeds.
+
+    Returns (rows, work_dir); each row has the tool's verdict plus the error against the team's
+    own placement where one exists. Nothing under the real village folder is touched.
+    """
+    seeds = [str(s) for s in seeds]
+    stamp = datetime.datetime.now().strftime("%Y%m%d")
+    work = paths.logs_dir() / ("seed_%s_%s_%s" % (village, label or "-".join(seeds), stamp))
+    src = paths.vector_dir(village)
+    real_project = paths.PROJECT
+    if work.exists():
+        shutil.rmtree(work)
+    (work / "FMB_Vector" / village).mkdir(parents=True)
+    for f in src.iterdir():
+        if f.is_dir():
+            if f.name in ("neighbour_transcription",):
+                shutil.copytree(f, work / "FMB_Vector" / village / f.name, dirs_exist_ok=True)
+            continue
+        name = f.name
+        if "_parcels_modified" in name or name.endswith(".points"):
+            survey = name.split("_parcels")[0]
+            if survey not in seeds:
+                continue                              # only the seeds keep their hand placement
+        if name in ("georef_status.csv", "anchors.csv", "rail_conflicts.csv"):
+            continue
+        shutil.copy2(f, work / "FMB_Vector" / village / name)
+    georef_src = real_project / "FMB_Georef" / village
+    if georef_src.exists():
+        (work / "FMB_Georef" / village).mkdir(parents=True, exist_ok=True)
+        for f in georef_src.glob("*"):
+            if f.is_file() and f.suffix in (".json", ".xml"):
+                shutil.copy2(f, work / "FMB_Georef" / village / f.name)
+    truths = {}
+    for s in paths.surveys_with_sheets(village):
+        if s in seeds:
+            continue
+        tr = truth_pose(village, s)
+        if tr is not None:
+            truths[s] = (tr, _sheet_at(village, s, tr["theta"], tr["t"]))
+    only = None
+    raster_bounds = None
+    if rings is not None:
+        only = ring_around(village, seeds, rings)
+        # a satellite window just around the seed and its ring, not the whole village
+        seed_bodies = []
+        for s in seeds:
+            tr = truth_pose(village, s)
+            if tr is not None:
+                seed_bodies.append(_sheet_at(village, s, tr["theta"], tr["t"]))
+        if seed_bodies:
+            from shapely.ops import unary_union
+            b = unary_union(seed_bodies).bounds
+            # neighbours the ring may reach lie within roughly one parcel width of the seed
+            m = raster_margin_m + 0.5 * max(b[2] - b[0], b[3] - b[1])
+            raster_bounds = (b[0] - m, b[1] - m, b[2] + m, b[3] + m)
+    try:
+        paths.PROJECT = work
+        neighbours._CACHE.pop(village, None)
+        if raster_bounds is not None:
+            pin = work / "FMB_Georef" / village / "raster.json"
+            if pin.exists():
+                pin.unlink()                    # force a fresh, local export in the work copy
+        summary = engine.run(village, do_raster=raster_bounds is not None, do_topology=do_topology,
+                             do_review=False, only=only, raster_bounds=raster_bounds)
+        summary["only"] = only
+        rows = review.read_status(village)
+        for r in rows:
+            r["error_m"] = ""
+            r["heading_error_deg"] = ""
+            out = paths.output_path(village, r["survey"])
+            if r["survey"] in truths and out.exists():
+                import geopandas as gpd
+                got = gpd.read_file(out, layer="parcels")
+                placed = sheets.dissolve([(None, g) for g in got.geometry])
+                tr, tg = truths[r["survey"]]
+                r["error_m"] = round(centroid_error(placed, tg), 2)
+                r["heading_error_deg"] = round(heading_error(float(r.get("heading_deg") or 0.0), tr["theta"]), 2)
+    finally:
+        paths.PROJECT = real_project
+        neighbours._CACHE.pop(village, None)
+    return rows, work, summary
+
+
 def calibrate(rows):
     """Green must sit above every best-wrong score; amber above the median wrong score."""
     wrong = [r["share_best_wrong"] for r in rows if r.get("share_best_wrong") is not None]

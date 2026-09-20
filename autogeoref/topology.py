@@ -117,6 +117,41 @@ def fix(geoms, movable, rail, gap_tol=1.20):
     return out, report
 
 
+def apply_to_parts(parts, fixed_body, original_body):
+    """Carry a survey's topology-fixed body down to its sub-plots.
+
+    `parts` is [(props, geom)] as placed. Every part is clipped to the fixed body (so a clipped
+    overlap disappears from the plot that held it) and each filled gap piece goes to the part
+    that borders it most. Returns [(props, geom, note)] with note "" / "clipped" / "filled".
+    """
+    out = []
+    added = fixed_body.difference(original_body)
+    pieces = [p for p in (added.geoms if added.geom_type.startswith("Multi") else [added])
+              if not p.is_empty and p.area > MIN_AREA]
+    owner = {}
+    for i, piece in enumerate(pieces):
+        best, best_len = None, 0.0
+        for k, (_props, g) in enumerate(parts):
+            shared = g.buffer(0.05).intersection(piece).area
+            if shared > best_len:
+                best, best_len = k, shared
+        if best is not None:
+            owner.setdefault(best, []).append(piece)
+    for k, (props, g) in enumerate(parts):
+        ng = g.intersection(fixed_body)
+        note = ""
+        if abs(ng.area - g.area) > MIN_AREA:
+            note = "clipped"
+        if k in owner:
+            ng = unary_union([ng] + owner[k])
+            note = (note + ",filled").strip(",")
+        ng = _largest(ng)
+        if ng is None or ng.is_empty or ng.geom_type not in ("Polygon", "MultiPolygon"):
+            ng, note = g, "kept (edit would empty the plot)"
+        out.append((props, ng, note))
+    return out
+
+
 def report_rail_conflicts(village, report):
     p = paths.vector_dir(village) / "rail_conflicts.csv"
     with p.open("w", newline="", encoding="utf-8") as fh:

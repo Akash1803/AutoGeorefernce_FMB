@@ -58,3 +58,23 @@ def test_an_edit_that_would_eat_a_polygon_is_refused_and_reported():
     out, rep = topology.fix({"A": A, "S": small}, movable={"S"}, rail=set())
     assert not out["S"].is_empty
     assert rep["refused"], "taking most of a polygon must be refused, not done quietly"
+
+
+def test_apply_to_parts_carries_a_clip_to_the_plot_that_held_the_overlap():
+    a1 = Polygon([(0, 0), (5, 0), (5, 10), (0, 10)])          # west half of A
+    a2 = Polygon([(5, 0), (10, 0), (10, 10), (5, 10)])        # east half, overlaps B by 0.3 m
+    original = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    fixed = Polygon([(0, 0), (9.7, 0), (9.7, 10), (0, 10)])   # after clipping against B
+    out = topology.apply_to_parts([({"poly_id": 1}, a1), ({"poly_id": 2}, a2)], fixed, original)
+    assert out[0][2] == "" and out[0][1].equals(a1), "the west plot was not involved"
+    assert out[1][2] == "clipped" and out[1][1].area == pytest.approx(47.0, abs=0.01)
+
+
+def test_apply_to_parts_gives_a_filled_gap_to_the_bordering_plot():
+    a1 = Polygon([(0, 0), (5, 0), (5, 10), (0, 10)])
+    a2 = Polygon([(5, 0), (10, 0), (10, 10), (5, 10)])
+    original = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    fixed = Polygon([(0, 0), (10.3, 0), (10.3, 10), (0, 10)])  # a 0.3 m strip filled on the east
+    out = topology.apply_to_parts([({"poly_id": 1}, a1), ({"poly_id": 2}, a2)], fixed, original)
+    assert out[1][2] == "filled" and out[1][1].area == pytest.approx(53.0, abs=0.01)
+    assert out[0][1].equals(a1)

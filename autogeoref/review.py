@@ -17,7 +17,8 @@ from . import paths, qgis_bridge
 
 STATUS_COLUMNS = ["survey", "status", "method", "colour", "confidence", "share", "margin",
                   "observable", "boundary_rms_m", "matched_length_m", "support_m", "support_next_m",
-                  "n_candidates", "printed_far", "neighbours", "heading_deg",
+                  "n_candidates", "printed_far", "side_ok", "side_bad", "contradictions", "certain",
+                  "anchor_partners", "pass", "neighbours", "heading_deg",
                   "shift_m", "sigma_pos_m", "sigma_head_deg", "puvi_reference_m", "puvi_trusted",
                   "puvi_ratio", "anchor_file", "notes", "file", "fp_placed", "fp_final", "run"]
 TRACKER_COLUMNS = ["Auto colour", "Auto note", "Auto run"]

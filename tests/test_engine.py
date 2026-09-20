@@ -168,3 +168,30 @@ def test_calibration_of_2026_09_19_holds():
     assert engine.colour_of(one) == "red"                                       # 40B, 16.4 m
     imaged_two = dict(two, share=0.811, boundary_rms_m=2.059)
     assert engine.colour_of(imaged_two) == "amber"                              # 48A, 4.1 m
+
+
+def test_green_needs_a_direct_tie_to_the_teams_own_parcels():
+    """47B, seed run 2026-09-19: three neighbours, all placed in the same pass from one wrong guess."""
+    row = {"boundary_rms_m": 0.265, "anchor_rms_m": 0.66, "share": 0.5, "observable": False,
+           "n_neighbours": 3, "method": "neighbour", "ambiguous": False,
+           "support_m": 80.0, "support_next_m": 54.0, "contradictions": 0, "anchor_partners": 0}
+    assert engine.colour_of(row) != "green"
+    assert engine.colour_of(dict(row, anchor_partners=1)) == "green"
+
+
+def test_side_checks_read_both_sheets():
+    """48A prints 47B to its south and 47B prints 48A to its north; a pose that puts 47B north
+    of 48A contradicts both."""
+    from autogeoref import anchors, evaluate, paths
+    if not paths.vector_dir("35_04_077").exists():
+        pytest.skip("village not present")
+    v = "35_04_077"
+    amap = {k: a for k, a in anchors.load_anchors(v, set()).items() if k == "48A"}
+    placed = {k: (a.theta, a.t) for k, a in amap.items()}
+    bodies = engine.placed_bodies(v, placed)
+    truth = evaluate.truth_pose(v, "47B")
+    ok, bad = engine.side_checks(v, "47B", (truth["theta"], truth["t"]), placed, bodies)
+    assert ok == 2 and bad == 0
+    flipped = (truth["theta"], truth["t"] + np.array([0.0, 160.0]))     # north of 48A instead
+    ok2, bad2 = engine.side_checks(v, "47B", flipped, placed, bodies)
+    assert bad2 == 2
