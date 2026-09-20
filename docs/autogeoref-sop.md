@@ -1,6 +1,6 @@
 # Auto-georeferencing SOP for FMB sheets (Tambaram to Chengalpattu corridor)
 
-Version 2, 2026-09-19. Code: `D:\code\FMB_to_GeoJSON\autogeoref`. Project:
+Version 3, 2026-09-20. Code: `D:\code\FMB_to_GeoJSON\autogeoref`. Project:
 `D:\Projects\Tambaram_Chengalpattu`.
 
 ## The idea in one paragraph
@@ -21,7 +21,33 @@ comes back green, amber or red so you know what to check.
 3. Make sure the two-reader neighbour transcription exists:
    `FMB_Vector\<village>\neighbour_transcription\nb_override_<village>.json`.
 
-## Run
+## The process (agreed 2026-09-20): grow from a seed, one ring at a time
+
+1. **Seed.** Pick one parcel you have placed by hand (Kizhikaranai: 48A). It is fixed; its
+   pose is read from your `.points` file. Nothing else of yours is used for the automation.
+2. **Local satellite window.** The tool exports Google Satellite only around the seed and its
+   ring (about 300 m across, 12 MB), never the whole village, so the tile reprojection error
+   stays local.
+3. **Ring 1.** The sheets print the survey numbers around each parcel and on which side. The
+   parcels the seed's sheet names, and those whose sheets name the seed, are placed first:
+   laid against the seed edge for edge, checked against the printed sides read from both
+   sheets, tied to the seed's edge lines, adjusted, then topology-cleaned.
+4. **Automatic ground control points.** Every corner of a placed parcel is written as a GCP
+   in the QGIS Georeferencer format, matched to a satellite edge where one exists. Your points
+   files are never read for the automated parcels.
+5. **Review in your project.** A group is added to your open project: the seed in cyan, the
+   automated parcels as red outlines at exactly your line width, the GCPs as yellow crosses,
+   the satellite window switched off. Your layers are not touched, reloaded or restyled.
+6. **Your verdict, then ring 2.** Parcels you accept become fixed for the next ring. The village
+   grows outward until every sheet in the buffer is placed or flagged.
+
+Command for one step (a work copy is made under `_logs\seed_<village>_<seed>_ring<n>_<date>`):
+
+```
+python -c "from autogeoref import evaluate; evaluate.seed_run('35_04_077', ['48A'], rings=1)"
+```
+
+## Run (whole village, once it has enough accepted parcels)
 
 ```
 cd D:\code\FMB_to_GeoJSON
@@ -92,6 +118,22 @@ Three rules override everything else:
    from your points and marks it as team-fixed.
 4. Green parcels and refitted parcels become seeds for the next run, so the village grows
    outward from your work.
+
+## Data cleaning before anything is shown
+
+Every parcel the tool edits in the topology step is cleaned: gap strips are built with straight
+mitred joins and limited to the space between the two parcels, hairline gaps are closed so a
+filled strip merges into its plot (no double lines), needles thinner than 0.2 m are removed,
+each plot is one ring, and collinear vertices left by clipping are dropped. Plots the topology
+step did not touch keep the sheet's exact vertices. A railway strip keeps its shape; a parcel
+the tool placed is clipped to it and the conflict is listed in `rail_conflicts.csv`.
+
+## When your manual parcel and the automation disagree
+
+The automation keeps every printed length. If your hand placement was stretched to fit (47B on
+2026-09-20: 124 m along the strip where the sheet prints 109 m, area 7056 m² for a 6243 m²
+parcel), the tool's version is the FMB parcel and the report's "distance from your placement"
+is measuring your stretch, not an error of the tool. Decide per parcel which one stands.
 
 ## What the tool will not do
 
