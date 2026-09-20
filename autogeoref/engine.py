@@ -576,7 +576,10 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
     if do_topology and written:
         geoms = {s: unary_union([fit.apply_pose(g, adjusted[s]["theta"], adjusted[s]["t"])
                                  for _p, g in sheets.load_sheet(village, s)]) for s in written}
-        geoms.update({s: anchors.placed_geometry(village, a) for s, a in anchor_map.items()})
+        # the team's parcels take part as the team drew them (affine, vertex-edited), not as the
+        # rigid sheet at the recovered pose: on 2026-09-20 47B was clipped clean against the
+        # rigid 48A and still overlapped Akash's real 48A by 19.5 m2
+        geoms.update({s: team_geometry(village, a) for s, a in anchor_map.items()})
         rail = {s for s in geoms if s in _rail_parcels(village)}
         fixed, report = topology.fix(geoms, movable=set(written), rail=rail)
         topology.report_rail_conflicts(village, report)
@@ -595,6 +598,20 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
     return {"village": village, "anchors": len(anchor_map), "placed": len(written),
             "waiting": sum(1 for r in rows if r.get("status") == "waiting"),
             "conflicts": len(conflicts), "run": run_id, "rows": rows}
+
+
+def team_geometry(village, anchor):
+    """The hand-placed parcel exactly as the team saved it, dissolved to one body."""
+    try:
+        hand = gpd.read_file(anchor.file)
+        if hand.crs is not None and hand.crs.to_epsg() != 32644:
+            hand = hand.to_crs(32644)
+        body = unary_union([g.buffer(0) for g in hand.geometry if g is not None and not g.is_empty])
+        if not body.is_empty:
+            return body
+    except Exception:
+        pass
+    return anchors.placed_geometry(village, anchor)
 
 
 def write_topology(village, written, adjusted, original, fixed):

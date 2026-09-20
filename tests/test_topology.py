@@ -30,11 +30,18 @@ def test_an_anchor_is_never_modified():
     assert out["A"].equals(A), "A is not movable, so it must come back untouched"
 
 
-def test_railway_overlap_is_listed_not_clipped():
+def test_railway_land_keeps_its_shape_and_the_tool_placed_parcel_yields():
     out, rep = topology.fix({"169": A, "42B": B_OVERLAP}, movable={"169", "42B"}, rail={"169"})
     assert out["169"].area == pytest.approx(A.area, abs=0.01), "railway land keeps its shape"
-    assert rep["rail_conflicts"], "the conflict is reported for the team"
+    assert rep["rail_conflicts"], "the conflict is still reported for the team"
     assert rep["rail_conflicts"][0][2] == pytest.approx(3.0, abs=0.5)
+    assert out["42B"].intersection(out["169"]).area < 0.02, "the ordinary parcel is clipped to the strip"
+
+
+def test_a_team_parcel_next_to_railway_land_is_only_reported():
+    out, rep = topology.fix({"169": A, "42B": B_OVERLAP}, movable={"169"}, rail={"169"})
+    assert out["42B"].equals(B_OVERLAP) and out["169"].equals(A)
+    assert rep["rail_conflicts"]
 
 
 def test_fix_is_idempotent():

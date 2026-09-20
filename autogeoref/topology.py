@@ -73,9 +73,17 @@ def fix(geoms, movable, rail, gap_tol=1.20):
                 continue
             ra, rb = a in rail, b in rail
             if ra != rb:
+                # railway land was carved out of the older parcel, so the strip keeps its shape.
+                # A parcel the tool placed is clipped to it (guarded); a team parcel is only reported.
                 pair = (a, b, round(inter.area, 2))
                 if pair not in report["rail_conflicts"]:
                     report["rail_conflicts"].append(pair)
+                other = b if ra else a
+                strip = a if ra else b
+                if other in movable and edit(other, out[other].difference(out[strip]),
+                                             "clip against railway land %s" % strip, inter.area):
+                    report["clips"].append([other, "clipped against railway land", strip, round(inter.area, 2)])
+                    changed += 1
                 continue
             big, small = (a, b) if out[a].area >= out[b].area else (b, a)
             if big not in movable:
