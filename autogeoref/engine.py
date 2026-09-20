@@ -49,6 +49,11 @@ SUPPORT_MARGIN = 0.80        # the runner-up pose must explain less than this sh
                              # pose's boundary, or the neighbours have not really chosen
 PRINTED_REACH_M = 10.0       # a placed parcel the sheet names as a neighbour must be this close
 SIDE_COS = 0.38              # a neighbour must lie within 67.5 degrees of the side the sheet prints it on
+LINE_REACH_M = 8.0           # a boundary sample may seek a printed neighbour's edge this far away
+LINE_STEP_M = 2.0            # metres between boundary samples that become line observations
+LINE_DEG = 15.0              # the neighbour's edge must run within this of the sample's own edge
+SIGMA_LINE = 0.60            # metres; many samples per edge, so each one is weighted loosely
+ADJUST_ROUNDS = 3            # rebuild the observations from the adjusted poses and solve again
 
 
 def colour_of(row):
@@ -152,6 +157,54 @@ def write_parcels(village, survey, theta, t, row, out_dir=None):
         target.parent.mkdir(parents=True, exist_ok=True)
         writer(target)
     return target
+
+
+def boundary_line_observations(village, survey, pose, placed, anchor_map, reach_m=LINE_REACH_M):
+    """Tie this sheet's boundary samples to the edges of the printed neighbours already placed.
+
+    For each sample (every LINE_STEP_M along the outline, in sheet metres) the nearest edge of a
+    printed neighbour's sheet is found in ground coordinates; it must run within LINE_DEG of the
+    sample's own edge and lie within reach_m. The observation is stored in both sheets' own
+    metres, so it holds whether the neighbour is fixed or still free.
+    """
+    theta, t = pose
+    local_pts, brg = sheets.sample_outline(sheets.outline(sheets.load_sheet(village, survey)), LINE_STEP_M)
+    ground = fit.transform_points(local_pts, theta, t)
+    out = []
+    for other, (th_o, t_o) in placed.items():
+        if other == survey or neighbours.are_neighbours(village, survey, other) is not True:
+            continue
+        v_loc = sheets.outline(sheets.load_sheet(village, other))
+        v_gnd = fit.transform_points(v_loc, th_o, t_o)
+        sigma = SIGMA_LINE + (anchor_map[other].rms if other in anchor_map else 0.0)
+        n = len(v_loc)
+        edges_g = [(v_gnd[i], v_gnd[(i + 1) % n]) for i in range(n)]
+        for k, p in enumerate(ground):
+            sb = (brg[k] + math.radians(theta)) % math.pi
+            best = None
+            for i, (a, b) in enumerate(edges_g):
+                d = b - a
+                L = float(np.hypot(d[0], d[1]))
+                if L < 1.0:
+                    continue
+                eb = math.atan2(d[1], d[0]) % math.pi
+                diff = abs((eb - sb + math.pi / 2) % math.pi - math.pi / 2)
+                if diff > math.radians(LINE_DEG):
+                    continue
+                # perpendicular distance, but only within the edge's own extent
+                s = float(((p - a) @ d) / (L * L))
+                if s < -0.05 or s > 1.05:
+                    continue
+                perp = abs(((p[0] - a[0]) * d[1] - (p[1] - a[1]) * d[0]) / L)
+                if best is None or perp < best[0]:
+                    best = (perp, i)
+            if best is None or best[0] > reach_m:
+                continue
+            i = best[1]
+            out.append(fit.PairLineObs(survey, (float(local_pts[k][0]), float(local_pts[k][1])), other,
+                                       (float(v_loc[i][0]), float(v_loc[i][1])),
+                                       (float(v_loc[(i + 1) % n][0]), float(v_loc[(i + 1) % n][1])), sigma))
+    return out
 
 
 def neighbour_chains(village, survey, pose, placed, anchor_map, gate_m=CHAIN_GATE_M):
@@ -515,6 +568,21 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
             row["certain"] = (row, pose) in certain
             rows.append(row)
             placed_this_pass.append(row["survey"])
+        # refinement: a sheet committed early in a pass never saw the sheets committed after it.
+        # 47B (2026-09-20) was proposed against 48A alone, took the one short shared edge and
+        # came out 9.5 degrees off; its long edge with 171, committed in the same pass, would
+        # have pinned it. Re-propose each newly placed sheet against everything now on the
+        # ground and keep the new pose when more boundary supports it.
+        for survey in placed_this_pass:
+            others = {k: p for k, p in placed.items() if k != survey}
+            other_bodies = {k: b for k, b in bodies.items() if k != survey}
+            row2, pose2 = _place_one(village, survey, stamp, others, other_bodies, anchor_map, index, pass_no)
+            old_row = next(r for r in rows if r["survey"] == survey)
+            if pose2 is not None and (row2.get("contradictions") or 0) <= (old_row.get("contradictions") or 0)                     and (row2.get("support_m") or 0) > (old_row.get("support_m") or 0) + 1.0:
+                row2["certain"] = old_row.get("certain")
+                row2["notes"] = " | ".join(x for x in (row2.get("notes"), "refined after pass %d" % pass_no) if x)
+                rows[rows.index(old_row)] = row2
+                _commit(village, survey, pose2, placed, bodies)
         pending = [s for s in pending if s not in placed_this_pass]
         if not placed_this_pass:
             for survey in pending:
@@ -524,17 +592,27 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
                              "notes": "no placed neighbour shares a boundary (after %d passes)" % pass_no})
             break
 
-    # block adjustment: anchors fixed, everything else free
-
+    # block adjustment: anchors fixed, everything else free. Observations are rebuilt from the
+    # adjusted poses and the solve repeated, so an edge that was out of reach at first (47B's far
+    # end 13 m from 171's line) is caught once the first round has turned the parcel.
     free = {s: placed[s] for s in todo if s in placed}
-    pair_obs, line_obs, gcp_obs, priors = [], [], [], []
-    for s in free:
-        priors.append(fit.PosePrior(s, free[s][0], tuple(free[s][1]), SIGMA_START, 10.0))
-        obs, _supported, _partners = neighbour_chains(village, s, free[s], placed, anchor_map,
-                                                      gate_m=ADJUST_GATE_M)
-        pair_obs += obs
-    adjusted = fit.block_adjust(free, {s: (a.theta, a.t) for s, a in anchor_map.items()},
-                                pair_obs, line_obs, gcp_obs, priors)
+    fixed_poses = {s: (a.theta, a.t) for s, a in anchor_map.items()}
+    line_obs, gcp_obs = [], []
+    adjusted, pair_obs = {}, []
+    for _round in range(ADJUST_ROUNDS if free else 0):
+        current = dict(fixed_poses, **{s: (p[0], p[1]) for s, p in free.items()})
+        pair_obs, pair_line_obs, priors = [], [], []
+        for s in free:
+            priors.append(fit.PosePrior(s, free[s][0], tuple(free[s][1]), SIGMA_START, 10.0))
+            obs, _supported, _partners = neighbour_chains(village, s, free[s], current, anchor_map,
+                                                          gate_m=ADJUST_GATE_M)
+            pair_obs += obs
+            pair_line_obs += boundary_line_observations(village, s, free[s], current, anchor_map)
+        adjusted = fit.block_adjust(free, fixed_poses, pair_obs, line_obs, gcp_obs, priors,
+                                    pair_line_obs=pair_line_obs)
+        free = {s: (adjusted[s]["theta"], adjusted[s]["t"]) for s in adjusted}
+    for s in adjusted:
+        adjusted[s]["line_obs"] = sum(1 for o in pair_line_obs if o.a == s)
     poses = {s: {"theta": v["theta"], "t": v["t"]} for s, v in adjusted.items()}
     poses.update({s: {"theta": a.theta, "t": a.t} for s, a in anchor_map.items()})
     residuals = fit.residuals_by_pair(poses, pair_obs)

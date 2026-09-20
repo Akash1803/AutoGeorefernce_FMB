@@ -84,6 +84,23 @@ class GcpObs:
 
 
 @_dataclass
+class PairLineObs:
+    """A sheet point of survey `a` that must lie on an edge of survey `b`'s sheet.
+
+    Both are given in their own sheet metres and both may move. This is how a parcel is tied to
+    a railway strip: the strip draws one edge 300 m long, the parcel draws its 80 m share of it,
+    so no run of equal edge lengths exists (no PairObs), but every point of the parcel's edge
+    lies on the strip's line. 47B, 2026-09-20: 9.5 degrees off without it.
+    """
+    a: str
+    p_local: tuple
+    b: str
+    q1_local: tuple
+    q2_local: tuple
+    sigma: float
+
+
+@_dataclass
 class PosePrior:
     """Where a parcel is believed to be before the adjustment, and how strongly."""
     survey: str
@@ -93,7 +110,7 @@ class PosePrior:
     sigma_head: float
 
 
-def block_adjust(free, fixed, pair_obs, line_obs, gcp_obs, priors, f_scale=1.5):
+def block_adjust(free, fixed, pair_obs, line_obs, gcp_obs, priors, f_scale=1.5, pair_line_obs=()):
     """Least-squares rotation + shift per free survey; `fixed` surveys never move.
 
     Solved in a frame centred on the block: with raw UTM unknowns (easting about 3.9e5, northing
@@ -138,6 +155,14 @@ def block_adjust(free, fixed, pair_obs, line_obs, gcp_obs, priors, f_scale=1.5):
             r.append(perp / o.sigma)
         for o in gcp_obs:
             r += list((place(o.survey, x, o.p_local) - (np.asarray(o.map_xy, float) - origin)) / o.sigma)
+        for o in pair_line_obs:
+            p = place(o.a, x, o.p_local)
+            a = place(o.b, x, o.q1_local)
+            b = place(o.b, x, o.q2_local)
+            d = b - a
+            n = float(np.hypot(d[0], d[1]))
+            perp = ((p[0] - a[0]) * d[1] - (p[1] - a[1]) * d[0]) / n if n else 0.0
+            r.append(perp / o.sigma)
         for pr in priors:
             if pr.survey not in idx:
                 continue

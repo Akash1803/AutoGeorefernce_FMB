@@ -77,3 +77,24 @@ def test_a_prior_holds_a_parcel_that_has_no_observations():
                            pair_obs=[], line_obs=[], gcp_obs=[],
                            priors=[fit.PosePrior("D", 12.0, (700.0, 800.0), 2.5, 3.0)])
     assert out["D"]["shift_m"] < 0.01 and abs(out["D"]["dtheta_deg"]) < 0.01
+
+
+def test_a_parcel_is_turned_onto_a_strips_edge_by_line_observations():
+    """47B / 171, 2026-09-20: the strip draws one 300 m edge, the parcel its 80 m share of it,
+    so no equal-length chain exists; points of the parcel's edge must still lie on the line."""
+    import math
+    strip_local = [(0.0, 0.0), (300.0, 0.0), (300.0, 15.0), (0.0, 15.0)]      # fixed, at identity
+    parcel_local = [(0.0, 0.0), (80.0, 0.0), (80.0, 40.0), (0.0, 40.0)]
+    # the parcel belongs at (100, 15) on top of the strip; start it 6 degrees off about its corner
+    truth_theta, truth_t = 0.0, np.array([100.0, 15.0])
+    start_theta = 6.0
+    obs = []
+    for k in range(0, 81, 2):                                                   # samples along its bottom edge
+        obs.append(fit.PairLineObs("P", (float(k), 0.0), "S", (0.0, 15.0), (300.0, 15.0), 0.6))
+    # one short chain pins the corner (like 47B's short edge with 48A)
+    from autogeoref import match
+    pair = [match.PairObs("P", "S", (0.0, 0.0), (100.0, 15.0), 0.3)]
+    prior = [fit.PosePrior("P", start_theta, tuple(truth_t), 10.0, 10.0)]
+    out = fit.block_adjust({"P": (start_theta, truth_t.copy())}, {"S": (0.0, np.zeros(2))},
+                           pair, [], [], prior, pair_line_obs=obs)
+    assert abs(out["P"]["theta"] - truth_theta) < 0.3, out["P"]["theta"]
