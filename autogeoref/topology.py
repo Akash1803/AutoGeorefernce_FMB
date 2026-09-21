@@ -650,6 +650,29 @@ def _spiky(geom):
     return False
 
 
+def conform_as_body(survey, rigid_parts, settled, anchors=(), tol=CONFORM_TOL, anchor_tol=ANCHOR_CONFORM_TOL):
+    """Conform one survey as a single body, then carry the new outline down to its plots.
+
+    Used when plot-by-plot conform pulled a survey's plots apart. The dissolved outline is
+    conformed against `settled` (anchors and earlier outputs), each plot is clipped to it and
+    every filled piece goes to the plot bordering it most. Returns (parts, note) or (None, why).
+    """
+    body = unary_union([g for _p, g in rigid_parts])
+    if body.is_empty or body.geom_type != "Polygon":
+        return None, "body not a single polygon"
+    out, rep = conform({survey: [({"poly_id": 0, "plot_no": survey}, body)]}, settled, [survey],
+                       anchors=set(anchors), tol=tol, anchor_tol=anchor_tol)
+    new_body = out.get(survey, [(None, None, None)])[0][1]
+    if new_body is None or new_body.is_empty or new_body.geom_type != "Polygon" or not new_body.is_valid:
+        return None, "body conform failed"
+    for s, g in settled.items():
+        if new_body.intersection(g).area > SIBLING_OVERLAP_M2:
+            return None, "body conform overlaps %s" % s
+    parts = apply_to_parts(rigid_parts, new_body, body)
+    moved = rep.get("conformed", {}).get(survey, {}).get("max_move_m", 0.0)
+    return [(p, g, ("body-conformed," + n).strip(",")) for p, g, n in parts], "conformed as one body, max %.2f m" % moved
+
+
 def sanity(rigid_parts, new_parts, max_loss=MAX_LOSS):
     """Guard the resolved plots of one survey before they are written.
 

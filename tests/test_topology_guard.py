@@ -57,3 +57,22 @@ def test_sanity_trims_a_fallback_plot_against_a_filled_sibling():
     parts, notes = topology.sanity(rigid, [({"plot_no": "1"}, spiky1, ""), ({"plot_no": "2"}, grown2, "filled")])
     assert parts[0][1].intersection(parts[1][1]).area < 0.5
     assert parts[0][2] == "rigid-clipped"
+
+
+def test_conform_as_body_closes_small_gaps_to_settled_parcels_and_keeps_plots_clean():
+    # a 20 x 10 sheet with two plots, placed 1.2 m short of a settled parcel on its east side
+    rigid = [({"plot_no": "1"}, _sq(0, 0, 12, 10)), ({"plot_no": "2"}, _sq(12, 0, 20, 10))]
+    settled = {"E": _sq(21.2, -5, 40, 15), "N": _sq(-5, 10.5, 25, 20)}
+    parts, note = topology.conform_as_body("x", rigid, settled, anchors=set(settled), anchor_tol=1.5)
+    assert parts is not None and note.startswith("conformed as one body")
+    body = parts[0][1].union(parts[1][1])
+    assert body.distance(settled["E"]) < 0.01 and body.distance(settled["N"]) < 0.01
+    assert all(body.intersection(g).area < 0.5 for g in settled.values())
+    assert parts[1][1].area > 80 and parts[1][2].startswith("body-conformed")
+
+
+def test_conform_as_body_refuses_when_it_would_overlap():
+    rigid = [({"plot_no": "1"}, _sq(0, 0, 20, 10))]
+    settled = {"E": _sq(19.0, -5, 40, 15)}       # already overlapping by a metre
+    parts, why = topology.conform_as_body("x", rigid, settled, anchors=set(settled), anchor_tol=1.5)
+    assert parts is None or all(p[1].intersection(settled["E"]).area < 0.5 for p in parts)

@@ -753,6 +753,17 @@ def write_topology(village, written, adjusted, anchor_bodies, order, rail=()):
     for s in written:
         new_parts = resolved.get(s) or [(p, g, "") for p, g in rigid[s]]
         new_parts, guard_notes = topology.sanity(rigid[s], new_parts)
+        if any("came apart" in n for n in guard_notes):
+            # plot-level conform tore the survey; conform it as one body against what is settled
+            settled_now = dict(anchor_bodies)
+            settled_now.update({o: unary_union([g for _p, g, _n in resolved[o]]) for o in order
+                                if o != s and o in resolved and order.index(o) < order.index(s)})
+            alt, why = topology.conform_as_body(s, rigid[s], settled_now, anchors=set(anchor_bodies),
+                                                anchor_tol=topology.ANCHOR_CONFORM_TOL * 1.25)
+            if alt is not None:
+                alt, alt_notes = topology.sanity(rigid[s], alt)
+                if not any("rigid-clipped" in n or "came apart" in n for n in alt_notes):
+                    new_parts, guard_notes = alt, [why] + alt_notes
         notes = sorted({n for _p, _g, n in new_parts if n}) + guard_notes
         if s in report.get("conformed", {}):
             notes.append("conform max %.2f m" % report["conformed"][s]["max_move_m"])
