@@ -565,7 +565,7 @@ def _place_all(village, todo, stamp, placed, bodies, anchor_map, index):
     return {"rows": rows, "bodies": {s: bodies[s] for s in bodies if s in todo}}
 
 def run(village, do_raster=False, do_topology=False, do_review=True, project=None, only=None,
-        raster_bounds=None):
+        raster_bounds=None, use_imagery=True):
     """Steps 1-13 of spec section 5. Returns a summary dict; details go to georef_status.csv.
 
     `only`: place just these surveys (the ring around a seed); everything else is left alone.
@@ -597,7 +597,11 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
         b = unary_union(geoms).bounds
         raster_bounds = (b[0] - WINDOW_MARGIN_M, b[1] - WINDOW_MARGIN_M, b[2] + WINDOW_MARGIN_M, b[3] + WINDOW_MARGIN_M)
         do_raster = True
-    if todo and (do_raster or raster.pinned(village) is None):
+    if not use_imagery:
+        # neighbours only: no window is fetched and no edge index is built. Thirukatchur's 19
+        # anchors span the whole village and the automatic window for them ran past ten minutes.
+        do_raster, raster_bounds = False, None
+    if todo and use_imagery and (do_raster or raster.pinned(village) is None):
         if raster_bounds is not None:
             raster.export(village, tuple(raster_bounds), run_id=run_id)
         else:
@@ -608,7 +612,7 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
                 raster.export(village, (b[0] - 100, b[1] - 100, b[2] + 100, b[3] + 100), run_id=run_id)
 
     index = None
-    if todo and raster.pinned(village) is not None:
+    if todo and use_imagery and raster.pinned(village) is not None:
         index = edgemod.SegmentIndex(edgemod.detect(raster.pinned(village)["path"], min_len_m=3.0))
 
     bodies = placed_bodies(village, placed)

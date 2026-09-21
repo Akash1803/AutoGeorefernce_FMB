@@ -227,7 +227,7 @@ def anchor_conflicts(village, anchor_map, limit=0.30):
             ga, gb = geoms[a], geoms[b]
             if ga.distance(gb) > 5.0:
                 continue
-            ring = ga.exterior
+            ring = ga.exterior if ga.geom_type == "Polygon" else ga.boundary   # a hand file may dissolve to several parts
             n = max(20, int(ring.length / CONFLICT_SAMPLE))
             d = []
             for k in range(n):
