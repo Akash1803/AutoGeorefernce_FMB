@@ -14,7 +14,8 @@ import shutil
 
 import numpy as np
 
-from . import anchors, engine, fit, neighbours, paths, raster, review, sheets
+from . import (anchors, config as configmod, engine, evalrows, fit, neighbours, paths, raster,
+               references as refmod, review, sheets)
 
 REPORT_ONLY_RMS = 3.0
 
@@ -69,12 +70,21 @@ def _sheet_at(village, survey, theta, t):
                             for _p, g in sheets.load_sheet(village, survey)])
 
 
-def leave_one_out(village, surveys=None, mode="full", keep_work=True):
-    """Hide one manual parcel at a time on a copy of the village folder and score the placement."""
+def leave_one_out(village, surveys=None, mode="full", keep_work=True, cfg=None, write_rows=True):
+    """Hide one manual parcel at a time on a copy of the village folder and score the placement.
+
+    Every placed parcel of every hidden-survey run becomes one feature row (``evalrows``) with
+    its errors against both references, appended to ``_logs/eval/rows.csv`` when ``write_rows``.
+    """
+    cfg = cfg or configmod.load()
     stamp = datetime.datetime.now().strftime("%Y%m%d")
+    run_id = "loo_%s_%s" % (village, datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
     work_root = paths.logs_dir() / ("loo_%s_%s" % (village, stamp))
     src = paths.vector_dir(village)
     real_project = paths.PROJECT
+    refs = refmod.references(village, cfg)
+    refmod.write_exclusions(village, refs, cfg)
+    feature_rows = []
     targets = surveys or sorted(
         {p.name.split("_parcels_modified")[0] for p in src.glob("*_parcels_modified*.gpkg")},
         key=paths.survey_sort_key)
@@ -122,6 +132,9 @@ def leave_one_out(village, surveys=None, mode="full", keep_work=True):
                 import geopandas as gpd
                 got = gpd.read_file(out_gpkg, layer="parcels")
                 placed = sheets.dissolve([(None, g) for g in got.geometry])
+            pin = raster.pinned(village) or {}
+            feature_rows += evalrows.rows_from_run(village, run_id + "_" + survey, "loo", [], cfg, refs,
+                                                   imagery={"source": pin.get("source", ""), "sha256": pin.get("sha256", "")})
         finally:
             paths.PROJECT = real_project
             engine.SIGMA_AUTO = sigma0
@@ -147,6 +160,8 @@ def leave_one_out(village, surveys=None, mode="full", keep_work=True):
                             passed=bool(err_m <= tol_m and err_deg <= tol_deg)))
         if not keep_work:
             shutil.rmtree(work, ignore_errors=True)
+    if write_rows and feature_rows:
+        evalrows.append_rows(feature_rows)
     return results
 
 
@@ -168,7 +183,8 @@ def ring_around(village, seeds, rings=1):
     return sorted(reached, key=paths.survey_sort_key)
 
 
-def seed_run(village, seeds, do_topology=True, label=None, rings=None, raster_margin_m=60.0):
+def seed_run(village, seeds, do_topology=True, label=None, rings=None, raster_margin_m=60.0, cfg=None,
+             write_rows=True):
     """Keep only `seeds` as hand-placed parcels on a copy of the village and place everything
     else from them. This is the rollout situation: a village with one or two seeds.
 
@@ -176,8 +192,13 @@ def seed_run(village, seeds, do_topology=True, label=None, rings=None, raster_ma
     own placement where one exists. Nothing under the real village folder is touched.
     """
     seeds = [str(s) for s in seeds]
+    cfg = cfg or configmod.load()
     stamp = datetime.datetime.now().strftime("%Y%m%d")
+    run_id = "seed_%s_%s_%s" % (village, label or "-".join(seeds), datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
     work = paths.logs_dir() / ("seed_%s_%s_%s" % (village, label or "-".join(seeds), stamp))
+    refs = refmod.references(village, cfg)             # from the team's files, before the copy
+    refmod.write_exclusions(village, refs, cfg)
+    feature_rows = []
     src = paths.vector_dir(village)
     real_project = paths.PROJECT
     if work.exists():
@@ -226,6 +247,10 @@ def seed_run(village, seeds, do_topology=True, label=None, rings=None, raster_ma
         pin = raster.pinned(village)
         summary["raster_bounds"] = pin.get("bounds_32644") if pin else None
         summary["only"] = only
+        feature_rows = evalrows.rows_from_run(village, run_id, "seed", seeds, cfg, refs,
+                                              imagery={"source": (pin or {}).get("source", ""),
+                                                       "sha256": (pin or {}).get("sha256", "")})
+        summary["rows"] = len(feature_rows)
         rows = review.read_status(village)
         for r in rows:
             r["error_m"] = ""
@@ -241,6 +266,8 @@ def seed_run(village, seeds, do_topology=True, label=None, rings=None, raster_ma
     finally:
         paths.PROJECT = real_project
         neighbours._CACHE.pop(village, None)
+    if write_rows and feature_rows:
+        evalrows.append_rows(feature_rows)
     return rows, work, summary
 
 

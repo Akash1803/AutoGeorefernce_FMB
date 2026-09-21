@@ -40,9 +40,12 @@ def test_export_archives_the_previous_raster(tmp_path, monkeypatch):
     first = raster.export("35_04_077", bounds, run_id="20260101")
     assert first.exists()
     second = raster.export("35_04_077", bounds, run_id="20260102")
-    archived = list((tmp_path / "_logs").glob("**/satellite_*.tif"))
-    assert archived, "the previous raster is archived, never deleted"
+    archived = list((tmp_path / "_cache").glob("**/_archive/satellite_*.tif"))
+    assert archived, "the previous raster is archived in the cache, never deleted"
     assert second.exists() and second != first
+    assert str(tmp_path / "_cache") in str(second), "windows live in the deletable cache, not under FMB_Georef"
+    log = tmp_path / "_cache" / "imagery" / "imagery_log.csv"
+    assert log.exists() and log.read_text(encoding="utf-8").count("google_xyz") == 2, "every window is logged with its source"
 
 
 @pytest.mark.network

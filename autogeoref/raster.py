@@ -4,6 +4,7 @@ The QGIS layer "Google Satellite" is the XYZ source
 https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z} in EPSG:3857. rasterio reads it through GDAL's
 WMS/TMS driver given the XML description below, so no screenshot and no ECW writer are needed.
 """
+import csv
 import datetime
 import time
 import hashlib
@@ -16,7 +17,10 @@ import rasterio
 from rasterio.transform import from_origin
 from rasterio.warp import Resampling, reproject, transform_bounds
 
-from . import paths
+from . import config as configmod, paths
+
+LOG_COLUMNS = ["fetched", "village", "source", "zoom", "resolution_m", "minx", "miny", "maxx", "maxy",
+               "sha256", "path", "run_id"]
 
 TILE_XML = """<GDAL_WMS>
   <Service name="TMS"><ServerUrl>https://mt1.google.com/vt/lyrs=s&amp;x=${x}&amp;y=${y}&amp;z=${z}</ServerUrl></Service>
@@ -45,13 +49,28 @@ def _sha256(path):
     return h.hexdigest()
 
 
-def export(village, bounds, zoom=20, resolution=0.15, run_id=None):
-    """Write the satellite window for `bounds` (EPSG:32644 minx, miny, maxx, maxy) as a GeoTIFF."""
-    out_dir = paths.georef_dir(village)
+def export(village, bounds, zoom=20, resolution=0.15, run_id=None, cfg=None):
+    """Write the imagery window for `bounds` (EPSG:32644 minx, miny, maxx, maxy) as a GeoTIFF.
+
+    The window goes to the imagery cache (gitignored, deletable, see ``config.cache_dir``), never
+    under the repository, and every export is appended to ``imagery_log.csv`` there with its
+    source. ``cfg.imagery.source`` is ``google_xyz`` (tiles, inference only) or ``geotiff:<path>``
+    (a licensed orthomosaic); the pin file records which one produced the window.
+    """
+    cfg = cfg or configmod.load()
+    zoom = zoom if zoom is not None else cfg.imagery.zoom
+    out_dir = configmod.cache_dir(cfg) / village
     out_dir.mkdir(parents=True, exist_ok=True)
-    desc = out_dir / ("google_sat_z%d.xml" % zoom)
-    desc.write_text(TILE_XML.replace("<TileLevel>20</TileLevel>", "<TileLevel>%d</TileLevel>" % zoom),
-                    encoding="utf-8")
+    paths.georef_dir(village).mkdir(parents=True, exist_ok=True)
+    source = cfg.imagery.source
+    if source == "google_xyz":
+        desc = out_dir / ("google_sat_z%d.xml" % zoom)
+        desc.write_text(TILE_XML.replace("<TileLevel>20</TileLevel>", "<TileLevel>%d</TileLevel>" % zoom),
+                        encoding="utf-8")
+    else:
+        desc = Path(source[len("geotiff:"):])
+        if not desc.exists():
+            raise FileNotFoundError("imagery source %s not found" % desc)
     minx, miny, maxx, maxy = bounds
     width = int(round((maxx - minx) / resolution))
     height = int(round((maxy - miny) / resolution))
@@ -84,7 +103,7 @@ def export(village, bounds, zoom=20, resolution=0.15, run_id=None):
     out = out_dir / ("satellite_z%d_%s.tif" % (zoom, stamp))
     previous = pinned(village)
     if previous and previous.get("path") and str(out) != previous["path"]:
-        archive = paths.logs_dir() / ("georef_raster_archive_%s" % stamp)
+        archive = out_dir / "_archive"
         archive.mkdir(parents=True, exist_ok=True)
         try:
             shutil.move(previous["path"], str(archive / Path(previous["path"]).name))
@@ -95,13 +114,53 @@ def export(village, bounds, zoom=20, resolution=0.15, run_id=None):
     with rasterio.open(out, "w", **profile) as fh:
         fh.write(dst)
         fh.build_overviews([2, 4, 8, 16], Resampling.average)
+    sha = _sha256(out)
+    fetched = datetime.datetime.now().isoformat(timespec="seconds")
     paths.raster_pin(village).write_text(json.dumps(
-        {"path": str(out), "sha256": _sha256(out), "zoom": zoom, "resolution_m": resolution,
-         "fetched": datetime.datetime.now().isoformat(timespec="seconds"),
-         "bounds_32644": [minx, miny, maxx, maxy],
-         "source": "QGIS layer 'Google Satellite' (XYZ mt1.google.com/vt/lyrs=s) via GDAL_WMS/TMS",
-         "note": "internal review basemap only; not for redistribution"}, indent=1), encoding="utf-8")
+        {"path": str(out), "sha256": sha, "zoom": zoom, "resolution_m": resolution,
+         "fetched": fetched, "bounds_32644": [minx, miny, maxx, maxy],
+         "source": source, "cache_dir": str(configmod.cache_dir(cfg)),
+         "note": "inference only; internal review; not for redistribution; delete with --purge-cache"},
+        indent=1), encoding="utf-8")
+    log_path = configmod.cache_dir(cfg) / "imagery_log.csv"
+    new_log = not log_path.exists()
+    with log_path.open("a", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=LOG_COLUMNS)
+        if new_log:
+            w.writeheader()
+        w.writerow({"fetched": fetched, "village": village, "source": source, "zoom": zoom,
+                    "resolution_m": resolution, "minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy,
+                    "sha256": sha, "path": str(out), "run_id": run_id or ""})
     return out
+
+
+def purge_cache(cfg=None):
+    """Delete every cached imagery window and its log; pins are left and become stale."""
+    cfg = cfg or configmod.load()
+    d = configmod.cache_dir(cfg)
+    if d.exists():
+        shutil.rmtree(d)
+    return d
+
+
+def migrate_to_cache(village, cfg=None):
+    """Move a window pinned under FMB_Georef (pre-PR 0 layout) into the cache and repoint the pin."""
+    cfg = cfg or configmod.load()
+    pin = pinned(village)
+    if not pin or not pin.get("path"):
+        return None
+    src = Path(pin["path"])
+    dst_dir = configmod.cache_dir(cfg) / village
+    if not src.exists() or dst_dir in src.parents:
+        return src if src.exists() else None
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / src.name
+    shutil.move(str(src), str(dst))
+    pin["path"] = str(dst)
+    pin.setdefault("source", "google_xyz")
+    pin["cache_dir"] = str(configmod.cache_dir(cfg))
+    paths.raster_pin(village).write_text(json.dumps(pin, indent=1), encoding="utf-8")
+    return dst
 
 
 def pinned(village):

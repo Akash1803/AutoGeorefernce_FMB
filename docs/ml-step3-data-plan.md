@@ -62,13 +62,36 @@ any of:
 - any outline edge of the hand geometry differing from the printed FMB length by more than 10 %;
 - rigid fit of sheet to hand geometry worse than 3 m rms.
 
-Effect on the 15 Kizhikaranai parcels with the area scales recovered on 2026-09-19: at plus or
-minus 5 % five would be excluded (40B 0.934, 43B 0.917, 48B 0.902, 170 0.950, 47B 1.063); at
-plus or minus 10 % none by area, and 47B by the edge rule (124 m drawn where the sheet prints
-109 m). 169's `.points` affine is strongly anisotropic (1.21 by 0.59) and would be excluded by
-the anisotropy rule. **Please confirm 10 %** or set another figure. Stretched parcels stay in
-the rows with `stretched = 1`, `within_3m` null, and both errors reported; they are listed in
-`_logs\eval\excluded_stretched.csv` with the triggering rule.
+Decision of 2026-09-21: the rule is 10 % on area scale (`stretch.rule = pct`). Parcels between
+5 and 10 % stay labelled, carry their stretch as feature columns, and every report shows metrics
+with and without them. 47B is excluded through the village's `disputed.csv` (drawn 124 m along
+the strip where the sheet prints 109 m). A rigid fit worse than 3 m rms excludes under every rule
+(169, 3.05 m). Stretched parcels stay in the rows with `stretched = 1`, `within_3m` empty, and
+both errors reported; they are listed in `_logs\eval\excluded_stretched.csv` with the rule.
+
+Measured on the 15 Kizhikaranai parcels (2026-09-21; outline = mean distance from the FMB-exact
+outline to the hand outline, corners = mean distance from FMB-exact corners to the nearest hand
+vertex, both in metres):
+
+| Survey | Area scale | Long side | Short side | Outline mean | Corner mean | Tier |
+|---|---|---|---|---|---|---|
+| 40B | 0.934 | -2.8 % | -10.2 % | 2.27 | 3.29 | 5-10 % |
+| 43B | 0.917 | -15.3 % | -0.7 % | 3.14 | 3.52 | 5-10 % |
+| 47B | 1.063 | +11.3 % | -1.2 % | 4.61 | 4.67 | 5-10 %, excluded |
+| 48B | 0.902 | -2.8 % | -16.7 % | 3.71 | 4.00 | 5-10 % |
+| 170 | 0.950 | -0.9 % | -9.8 % | 1.03 | 2.17 | 5-10 % |
+| 42A | 1.022 | +5.0 % | -1.0 % | 1.51 | 3.24 | under 5 % |
+| others (9) | 0.968 to 1.005 | | | 0.24 to 1.97 | 0.61 to 2.66 | under 5 % |
+
+What this says: of the five parcels above 5 %, three (43B, 47B, 48B) disagree with their own
+hand placement by more than the 3 m acceptance limit and 40B sits at it; 170 is inside the
+noise floor. The proxy "stretch times extent" would mark 170 as 11 m off when it is 1 m off,
+because its 5 % is a narrower strip, not a slide; so a displacement rule must measure the
+displacement itself. The `displacement` rule in the config does that (larger of outline and
+corner mean above 3 m) and would exclude 40B, 42A, 43B, 47B, 48B and 169. It is available but
+not the default; switching is a one-line config change and the rows already carry both measures.
+The similarity-fit anisotropy from three control points is not usable as a measure (48B reads
+374) and is not part of any rule.
 
 **Disputed**: the 22 surveys where Puvi and the portal describe different parcels (569B and its
 kind), sheets marked No Sketch, parcels in `rail_conflicts.csv`, and any survey the team flags

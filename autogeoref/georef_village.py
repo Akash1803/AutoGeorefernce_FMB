@@ -2,7 +2,12 @@
 import argparse
 import sys
 
-from . import engine, gcp, paths, review
+import datetime
+import logging
+
+from . import config as configmod, engine, evalrows, gcp, paths, raster, references as refmod, report, review
+
+log = logging.getLogger(__name__)
 
 
 def parse(argv=None):
@@ -21,6 +26,15 @@ def parse(argv=None):
     ap.add_argument("--project", help="path to the .qgz the review group belongs in")
     ap.add_argument("--tracker", action="store_true",
                     help="also add the Auto colour/note/run columns to the tracker workbook")
+    ap.add_argument("--config", help="JSON config (default configs/default.json or $AUTOGEOREF_CONFIG)")
+    ap.add_argument("--rows", action="store_true",
+                    help="append one feature row per placed parcel to _logs/eval/rows.csv")
+    ap.add_argument("--report", action="store_true",
+                    help="write the evaluation report from every row logged so far and stop")
+    ap.add_argument("--purge-cache", dest="purge_cache", action="store_true",
+                    help="delete the imagery cache (windows and log) and stop")
+    ap.add_argument("--migrate-cache", dest="migrate_cache", action="store_true",
+                    help="move a pre-PR0 satellite window into the cache and repoint its pin")
     return ap.parse_args(argv)
 
 
@@ -37,6 +51,16 @@ def _corridor_rows(current_village, current_rows):
 
 def main(argv=None):
     args = parse(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    cfg = configmod.load(args.config)
+    if args.purge_cache:
+        print("imagery cache removed:", raster.purge_cache(cfg))
+        return 0
+    if args.report:
+        rows = evalrows.load_rows()
+        out = paths.logs_dir() / "eval" / ("report_%s.md" % datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
+        print("report:", report.write_report(rows, out, "all logged rows", cfg.acceptance_m))
+        return 0
     if not paths.vector_dir(args.village).exists() or not paths.surveys_with_sheets(args.village):
         print("no sheets found for village %s under %s"
               % (args.village, paths.vector_dir(args.village)))
@@ -59,9 +83,19 @@ def main(argv=None):
             print("%-6s refitted from %d team GCPs: heading %.2f, rms %.2f m"
                   % (survey, n, theta, rms))
         return 0
+    if args.migrate_cache:
+        print("migrated:", raster.migrate_to_cache(args.village, cfg))
     summary = engine.run(args.village, do_raster=args.raster, do_topology=args.topology,
                          do_review=args.review, project=args.project)
     rows = review.read_status(args.village)
+    if args.rows:
+        refs = refmod.references(args.village, cfg)
+        refmod.write_exclusions(args.village, refs, cfg)
+        pin = raster.pinned(args.village) or {}
+        feature_rows = evalrows.rows_from_run(args.village, "full_%s_%s" % (args.village, summary["run"]), "full", [],
+                                              cfg, refs, imagery={"source": pin.get("source", ""),
+                                                                  "sha256": pin.get("sha256", "")})
+        print("  rows:", evalrows.append_rows(feature_rows), "(%d rows)" % len(feature_rows))
     print("%s: %d anchors frozen, %d placed, %d waiting, %d anchor conflicts"
           % (summary["village"], summary["anchors"], summary["placed"], summary["waiting"],
              summary["conflicts"]))

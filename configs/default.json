@@ -1,0 +1,19 @@
+{
+  "acceptance_m": 3.0,
+  "imagery": {
+    "source": "google_xyz",
+    "cache_dir": "",
+    "zoom": 20,
+    "resolution_m": 0.15
+  },
+  "stretch": {
+    "rule": "pct",
+    "pct": 10.0,
+    "band_pct": 5.0,
+    "displacement_mean_m": 3.0,
+    "rms_m": 3.0
+  },
+  "ml": {
+    "confidence": "rule"
+  }
+}

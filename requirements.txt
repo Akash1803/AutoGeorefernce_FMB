@@ -1,0 +1,13 @@
+# Pinned to the versions installed on the FarmwiseAI laptop (FAI203-AKASH) on 2026-09-21.
+# CPU only. No PyTorch, no training stack: nothing is trained in this phase.
+numpy==2.5.1
+scipy==1.18.0
+shapely==2.1.2
+pyproj==3.7.2
+geopandas==1.1.4
+pandas==3.0.3
+rasterio==1.5.0
+opencv-python==5.0.0
+scikit-learn==1.9.0
+openpyxl==3.1.5
+pytest==9.1.1
