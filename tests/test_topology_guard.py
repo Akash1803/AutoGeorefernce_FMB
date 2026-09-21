@@ -94,7 +94,7 @@ def test_a_repaired_plot_fills_exactly_the_space_its_siblings_leave():
     rigid = [({"plot_no": "1"}, _sq(0, 0, 20, 20)), ({"plot_no": "2"}, _sq(20, 0, 24, 20))]
     # after resolve: plot 1 conformed (slightly wider), plot 2 came back invalid
     conformed1 = _sq(0, 0, 20.3, 20)
-    broken2 = Polygon([(20, 0), (24, 20), (24, 0), (20, 20)])                        # a bow-tie, invalid
+    broken2 = Polygon([(20, 0), (24, 0), (24, 20), (20, 20), (20, 10), (23, 10), (20, 10)])   # zero-width spike, invalid
     parts, notes = topology.sanity(rigid, [({"plot_no": "1"}, conformed1, "conformed"), ({"plot_no": "2"}, broken2, "")])
     body = parts[0][1].union(parts[1][1])
     assert body.geom_type == "Polygon", "the survey stays in one piece"
