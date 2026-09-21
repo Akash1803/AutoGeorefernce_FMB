@@ -66,3 +66,17 @@ def test_held_layers_finds_a_file_the_open_project_holds():
 def test_the_bridge_runs_code_inside_qgis():
     out = qgis_bridge.json_result("import json; print(json.dumps({'ok': 1 + 1}))")
     assert out == {"ok": 2}
+
+
+
+def test_safe_write_refuses_to_take_a_held_layer_out_of_the_project_by_default(tmp_path, monkeypatch):
+    """2026-09-21: replacing ten of the team's files removed their layers from the open project."""
+    target = tmp_path / "x.gpkg"
+    _write(target, 1)
+    monkeypatch.setattr(files, "held_layers", lambda p: [{"id": "L1", "name": "x", "editable": False}])
+    released = []
+    monkeypatch.setattr(files, "release", lambda p: released.append(p) or [])
+    assert files.safe_write(target, lambda p: _write(p, 2)) is False
+    assert released == [], "no layer was removed"
+    assert int(gpd.read_file(target)["v"].iloc[0]) == 1, "the file is untouched"
+    assert files.safe_write(target, lambda p: _write(p, 2), allow_release=True) is True

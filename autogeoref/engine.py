@@ -153,7 +153,7 @@ def write_parcels(village, survey, theta, t, row, out_dir=None):
             path, layer="edges", driver="GPKG")
 
     if target.exists():
-        if not files.safe_write(target, writer):
+        if not files.safe_write(target, writer, allow_release=True):
             raise PermissionError("cannot replace %s (open in QGIS?)" % target)
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -783,7 +783,7 @@ def write_topology(village, written, adjusted, anchor_bodies, order, rail=()):
             frame.to_file(path, layer="parcels", driver="GPKG")
             gpd.read_file(src, layer="edges").to_file(path, layer="edges", driver="GPKG")
 
-        if files.safe_write(target, writer):
+        if files.safe_write(target, writer, allow_release=True):
             edited[s] = ",".join(notes)
     return edited
 
