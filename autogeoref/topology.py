@@ -628,6 +628,66 @@ def resolve(parts_by_survey, settled, order, rail=(), anchors=None, tol=CONFORM_
     return out, report
 
 
+MAX_LOSS = 0.05                 # a parcel that lost more than this of its rigid area was mis-placed
+SPIKE_DEG = 10.0
+SPIKE_ARM_M = 2.0
+SIBLING_OVERLAP_M2 = 0.5
+
+
+def _spiky(geom):
+    ring = list(geom.exterior.coords)
+    n = len(ring) - 1
+    for i in range(n):
+        a, b, c = ring[i - 1], ring[i], ring[(i + 1) % n]
+        v1 = (a[0] - b[0], a[1] - b[1])
+        v2 = (c[0] - b[0], c[1] - b[1])
+        l1, l2 = math.hypot(*v1), math.hypot(*v2)
+        if min(l1, l2) < SPIKE_ARM_M:
+            continue
+        ang = math.degrees(math.acos(max(-1.0, min(1.0, (v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2)))))
+        if ang < SPIKE_DEG:
+            return True
+    return False
+
+
+def sanity(rigid_parts, new_parts, max_loss=MAX_LOSS):
+    """Guard the resolved plots of one survey before they are written.
+
+    Returns (parts, notes). A plot that came out invalid, spiky (a corner under SPIKE_DEG with
+    arms over SPIKE_ARM_M) or overlapping a sibling plot is replaced by its rigid geometry clipped
+    to the resolved body ("rigid-clipped"). If the survey lost more than `max_loss` of its rigid
+    area to clipping, the note "topology cut N %" is added: the placement, not the topology, is
+    at fault, and the caller marks the parcel red. 51 lost 36 % and 50A 7 % on 2026-09-21 and
+    were delivered with sliver plots.
+    """
+    rigid = {i: g for i, (_p, g) in enumerate(rigid_parts)}
+    body_rigid = unary_union([g for _p, g in rigid_parts])
+    body_new = unary_union([g for _p, g, _n in new_parts])
+    notes = []
+    loss = (body_rigid.area - body_new.area) / body_rigid.area if body_rigid.area else 0.0
+    if loss > max_loss:
+        notes.append("topology cut %.0f %%" % (100 * loss))
+    parts = list(new_parts)
+    bad = set()
+    for i, (_p, g, _n) in enumerate(parts):
+        if g is None or g.is_empty or g.geom_type != "Polygon" or not g.is_valid or _spiky(g):
+            bad.add(i)
+    for i in range(len(parts)):
+        for j in range(i + 1, len(parts)):
+            gi, gj = parts[i][1], parts[j][1]
+            if gi is not None and gj is not None and gi.intersection(gj).area > SIBLING_OVERLAP_M2:
+                bad.add(i if gi.area < gj.area else j)
+    for i in sorted(bad):
+        props, _g, note = parts[i]
+        fallback = _largest(rigid[i].intersection(body_new)) if i in rigid else None
+        if fallback is None or fallback.is_empty or fallback.geom_type != "Polygon":
+            fallback = rigid.get(i, _g)
+        parts[i] = (props, fallback, (note + ",rigid-clipped").strip(","))
+    if bad:
+        notes.append("%d plot(s) rigid-clipped" % len(bad))
+    return parts, notes
+
+
 def report_rail_conflicts(village, report):
     p = paths.vector_dir(village) / "rail_conflicts.csv"
     with p.open("w", newline="", encoding="utf-8") as fh:

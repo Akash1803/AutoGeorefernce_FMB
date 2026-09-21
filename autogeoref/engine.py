@@ -707,6 +707,9 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
             if row["survey"] in edited:
                 row["notes"] = " | ".join(x for x in (row.get("notes"), "topology: " + edited[row["survey"]]) if x)
                 row["fp_placed"] = anchors.fingerprint(paths.output_path(village, row["survey"]))
+                if "topology cut" in edited[row["survey"]] and row.get("colour") != "red":
+                    # a parcel the resolver had to carve was mis-placed; the carving is not a fix
+                    row["colour"], row["confidence"] = "red", 0
 
     for row in rows:
         if row.get("fp_placed"):
@@ -749,7 +752,8 @@ def write_topology(village, written, adjusted, anchor_bodies, order, rail=()):
     edited = {}
     for s in written:
         new_parts = resolved.get(s) or [(p, g, "") for p, g in rigid[s]]
-        notes = sorted({n for _p, _g, n in new_parts if n})
+        new_parts, guard_notes = topology.sanity(rigid[s], new_parts)
+        notes = sorted({n for _p, _g, n in new_parts if n}) + guard_notes
         if s in report.get("conformed", {}):
             notes.append("conform max %.2f m" % report["conformed"][s]["max_move_m"])
         if not notes:
