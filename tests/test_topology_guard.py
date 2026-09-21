@@ -39,3 +39,21 @@ def test_sanity_is_quiet_on_clean_plots():
     rigid = [({"plot_no": "1"}, _sq(0, 0, 20, 20))]
     parts, notes = topology.sanity(rigid, [({"plot_no": "1"}, _sq(0, 0, 20, 19.5), "conformed")])
     assert notes == [] and parts[0][2] == "conformed"
+
+
+def test_sanity_keeps_the_sheet_rigid_when_its_plots_came_apart():
+    rigid = [({"plot_no": "1"}, _sq(0, 0, 20, 20)), ({"plot_no": "2"}, _sq(20, 0, 30, 20))]
+    apart = [({"plot_no": "1"}, _sq(0, 0, 20, 20), "kept (conform refused)"), ({"plot_no": "2"}, _sq(21, 0, 31, 20), "conformed")]
+    parts, notes = topology.sanity(rigid, apart)
+    assert "plots came apart, survey kept rigid" in notes
+    assert parts[1][1].equals(_sq(20, 0, 30, 20)) and parts[1][2] == "rigid (plots came apart)"
+
+
+def test_sanity_trims_a_fallback_plot_against_a_filled_sibling():
+    rigid = [({"plot_no": "1"}, _sq(0, 0, 20, 20)), ({"plot_no": "2"}, _sq(20, 0, 30, 20))]
+    needle = Polygon([(20, 10), (5, 10.1), (20, 10.2)])
+    spiky1 = _sq(0, 0, 20, 20).difference(needle)
+    grown2 = _sq(18, 0, 30, 20)                       # sibling took a filled strip, not spiky
+    parts, notes = topology.sanity(rigid, [({"plot_no": "1"}, spiky1, ""), ({"plot_no": "2"}, grown2, "filled")])
+    assert parts[0][1].intersection(parts[1][1]).area < 0.5
+    assert parts[0][2] == "rigid-clipped"

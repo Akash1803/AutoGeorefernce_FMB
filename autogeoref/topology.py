@@ -667,6 +667,10 @@ def sanity(rigid_parts, new_parts, max_loss=MAX_LOSS):
     loss = (body_rigid.area - body_new.area) / body_rigid.area if body_rigid.area else 0.0
     if loss > max_loss:
         notes.append("topology cut %.0f %%" % (100 * loss))
+    if body_new.geom_type != "Polygon" and body_rigid.geom_type == "Polygon":
+        # the plots came apart (one conformed, one refused): the sheet is one piece, keep it so
+        return [(props, rigid[i], "rigid (plots came apart)") for i, (props, _g, _n) in enumerate(new_parts)], \
+            notes + ["plots came apart, survey kept rigid"]
     parts = list(new_parts)
     bad = set()
     for i, (_p, g, _n) in enumerate(parts):
@@ -683,6 +687,17 @@ def sanity(rigid_parts, new_parts, max_loss=MAX_LOSS):
         if fallback is None or fallback.is_empty or fallback.geom_type != "Polygon":
             fallback = rigid.get(i, _g)
         parts[i] = (props, fallback, (note + ",rigid-clipped").strip(","))
+    for i in sorted(bad):
+        # a fallback plot must not sit on a sibling that received a filled piece: trim it
+        props, g, note = parts[i]
+        for j, (_pj, gj, _nj) in enumerate(parts):
+            if j == i or gj is None or gj.is_empty or g is None:
+                continue
+            if g.intersection(gj).area > SIBLING_OVERLAP_M2:
+                trimmed = _largest(g.difference(gj))
+                if trimmed is not None and not trimmed.is_empty and trimmed.geom_type == "Polygon":
+                    g = trimmed
+        parts[i] = (props, g, note)
     if bad:
         notes.append("%d plot(s) rigid-clipped" % len(bad))
     return parts, notes
