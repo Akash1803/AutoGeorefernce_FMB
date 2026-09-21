@@ -753,8 +753,9 @@ def write_topology(village, written, adjusted, anchor_bodies, order, rail=()):
     for s in written:
         new_parts = resolved.get(s) or [(p, g, "") for p, g in rigid[s]]
         new_parts, guard_notes = topology.sanity(rigid[s], new_parts)
-        if any("came apart" in n for n in guard_notes):
-            # plot-level conform tore the survey; conform it as one body against what is settled
+        if any("came apart" in n or "topology cut" in n for n in guard_notes):
+            # plot-level conform tore the survey, or clipping carved it: try it as one body against
+            # what is settled (small moves only; a real mis-placement still overlaps and is refused)
             settled_now = dict(anchor_bodies)
             settled_now.update({o: unary_union([g for _p, g, _n in resolved[o]]) for o in order
                                 if o != s and o in resolved and order.index(o) < order.index(s)})
