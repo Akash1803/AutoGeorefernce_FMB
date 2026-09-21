@@ -24,7 +24,7 @@ def test_side_conflict_keeps_the_number_but_withholds_the_side():
     a = _reading(**{"85A": [("55", "S")]})
     b = _reading(**{"85A": [("55", "SW")]})
     table, dis, _ = transcribe.merge(a, b, ["85A"], "v")
-    assert table["85A"] == [{"number": "55", "side": "", "readers": 2, "confidence": "high"}]
+    assert table["85A"] == [{"number": "55", "side": "", "readers": 2, "confidence": "high", "source": "reader"}]
     assert len(dis) == 1 and dis[0].field == "side" and dis[0].side_a == "S" and dis[0].side_b == "SW"
 
 
@@ -58,7 +58,7 @@ def test_resolutions_fold_back_into_the_table():
             d.resolution = "no such side"
     assert transcribe.apply_resolutions(table, dis) == 2
     seven = next(r for r in table["91"] if r["number"] == "7")
-    assert seven["readers"] == 2 and seven["verified_by"] == "analyst"
+    assert seven["readers"] == 2 and seven["resolved_by"] == "hand" and seven["source"] == "hand"
     assert next(r for r in table["91"] if r["number"] == "44")["side"] == "S"
     assert next(r for r in table["85A"] if r["number"] == "55")["side"] == ""
 

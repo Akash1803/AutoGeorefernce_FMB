@@ -141,6 +141,13 @@ def disputed_reasons(village: str, survey: str) -> List[str]:
             for r in csv.DictReader(fh):
                 if r.get("survey") == survey:
                     reasons.append(r.get("reason") or "listed in disputed.csv")
+    corrections = paths.vector_dir(village) / "sheet_corrections.csv"
+    if corrections.exists():
+        with corrections.open(encoding="utf-8") as fh:
+            for r in csv.DictReader(fh):
+                if r.get("survey") == survey and (r.get("edge") or "") != "plots":
+                    reasons.append("outline corrected by hand (sheet_corrections.csv, verified_by=%s)"
+                                   % (r.get("verified_by") or "unverified"))
     return reasons
 
 

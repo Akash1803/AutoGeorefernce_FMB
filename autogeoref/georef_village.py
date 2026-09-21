@@ -90,6 +90,10 @@ def main(argv=None):
         rows = evalrows.load_rows()
         out = paths.logs_dir() / "eval" / ("report_%s.md" % datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
         print("report:", report.write_report(rows, out, "all logged rows", cfg.acceptance_m))
+        gate = report.pr3_gate(rows)
+        print("  rows %d | distinct labelled parcels %d (within %d, beyond %d) across %s | PR 3 gate (%d parcels, %d villages): %s"
+              % (gate["rows"], gate["distinct_labelled"], gate["parcels_within"], gate["parcels_beyond"],
+                 ", ".join(gate["villages"]) or "-", gate["min_parcels"], gate["min_villages"], "MET" if gate["ok"] else "not met"))
         return 0
     if not paths.vector_dir(args.village).exists() or not paths.surveys_with_sheets(args.village):
         print("no sheets found for village %s under %s"

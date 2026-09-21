@@ -56,3 +56,18 @@ after that check, not before.
 | `<vector_dir>/neighbour_transcription/seeds_<village>.json` | the seed plan |
 
 Every engine run now logs evaluation rows by default (`--no-rows` to skip).
+
+## Follow-ups of 2026-09-21 (Akash's review of PR 0 and PR 1)
+
+- Every table entry carries `source`: `reader` (both readers agreed) or `hand` (set through the
+  review CSV; such rows also carry `resolved_by = hand`). Reader agreement is computed before
+  resolutions, so hand-resolved rows never count towards reader accuracy. The review CSV has a
+  `resolved_by` column.
+- Sheets whose outline was corrected by hand (`sheet_corrections.csv`, rows other than plot
+  re-conversions, with `verified_by`) are excluded from the seed set and from labels; the seed
+  plan lists them under `excluded_from_seeds_and_labels`. Today: 613 (`verified_by = eye`).
+- The two readers on 2026-09-21 were the same vision model (Claude Fable 5.1) in two separate
+  contexts with different sheet batches. Not two different models.
+- Kizhikaranai (35_04_077) was re-run through this flow: 15 sheets, number agreement 1.0, side
+  agreement 0.945, 4 side rows to review; trusted numbers identical to the earlier table.
+  There is no Kolathur (35_04_073) in this project; the earlier data plan was wrong about it.

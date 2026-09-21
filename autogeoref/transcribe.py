@@ -31,7 +31,8 @@ log = logging.getLogger(__name__)
 
 SIDES = tuple(neighbours.SIDE_VEC)
 REVIEW_COLUMNS = ["village", "survey", "field", "number", "reader_a", "printed_a", "side_a",
-                  "reader_b", "printed_b", "side_b", "resolution", "note"]
+                  "reader_b", "printed_b", "side_b", "resolution", "resolved_by", "note"]
+SOURCE_READER, SOURCE_HAND = "reader", "hand"
 RESOLVE_YES = ("yes", "y", "keep", "ok", "true", "1")
 RESOLVE_NO = ("no", "n", "drop", "remove", "false", "0")
 
@@ -60,6 +61,7 @@ class Disagreement:
     printed_b: str
     side_b: str
     resolution: str = ""
+    resolved_by: str = ""            # "hand" once the analyst filled the resolution
     note: str = ""
 
     def key(self) -> Tuple[str, str, str]:
@@ -234,15 +236,15 @@ def merge(reading_a: Reading, reading_b: Reading, surveys: Optional[Iterable[str
                 if common:
                     agreed += 1
                     for side in common:
-                        rows.append({"number": n, "side": side, "readers": 2, "confidence": "high"})
+                        rows.append({"number": n, "side": side, "readers": 2, "confidence": "high", "source": SOURCE_READER})
                 else:
-                    rows.append({"number": n, "side": "", "readers": 2, "confidence": "high"})
+                    rows.append({"number": n, "side": "", "readers": 2, "confidence": "high", "source": SOURCE_READER})
                     disagreements.append(Disagreement(village, s, "side", n, name_a, ea[0].number, "/".join(sorted(sides_a)),
                                                       name_b, eb[0].number, "/".join(sorted(sides_b)),
                                                       note="number agreed, side differs"))
             else:
                 e, who = (ea[0], name_a) if ea else (eb[0], name_b)
-                rows.append({"number": n, "side": e.side, "readers": 1, "confidence": "low"})
+                rows.append({"number": n, "side": e.side, "readers": 1, "confidence": "low", "source": SOURCE_READER})
                 disagreements.append(Disagreement(village, s, "number", n,
                                                   name_a, ea[0].number if ea else "", ea[0].side if ea else "",
                                                   name_b, eb[0].number if eb else "", eb[0].side if eb else "",
@@ -257,7 +259,9 @@ def apply_resolutions(table: Dict[str, List[dict]], disagreements: List[Disagree
     """Fold the analyst's ``resolution`` column back into the table; returns the count applied.
 
     ``number`` rows: yes keeps the number as verified (``readers: 2``), no drops it.
-    ``side`` rows: a compass value becomes the side.
+    ``side`` rows: a compass value becomes the side. Every field set here carries
+    ``source = hand`` and ``resolved_by = hand``; reader accuracy is computed before this step
+    and never counts these.
     """
     applied = 0
     for d in disagreements:
@@ -270,10 +274,12 @@ def apply_resolutions(table: Dict[str, List[dict]], disagreements: List[Disagree
                 for r in rows:
                     if r["number"] == d.number:
                         r["readers"], r["confidence"] = 2, "high"
-                        r["verified_by"] = "analyst"
+                        r["source"], r["resolved_by"] = SOURCE_HAND, SOURCE_HAND
+                d.resolved_by = SOURCE_HAND
                 applied += 1
             elif res.lower() in RESOLVE_NO:
                 table[d.survey] = [r for r in rows if r["number"] != d.number]
+                d.resolved_by = SOURCE_HAND
                 applied += 1
             else:
                 log.warning("%s %s: resolution %r for a number row is not yes/no", d.survey, d.number, d.resolution)
@@ -282,7 +288,8 @@ def apply_resolutions(table: Dict[str, List[dict]], disagreements: List[Disagree
                 for r in rows:
                     if r["number"] == d.number:
                         r["side"] = res
-                        r["verified_by"] = "analyst"
+                        r["source"], r["resolved_by"] = SOURCE_HAND, SOURCE_HAND
+                d.resolved_by = SOURCE_HAND
                 applied += 1
             else:
                 log.warning("%s %s: resolution %r is not a compass side", d.survey, d.number, d.resolution)
@@ -342,7 +349,9 @@ def write_review_csv(village: str, disagreements: List[Disagreement]) -> Path:
         w = csv.DictWriter(fh, fieldnames=REVIEW_COLUMNS)
         w.writeheader()
         for d in disagreements:
-            w.writerow({k: getattr(d, k) for k in REVIEW_COLUMNS})
+            row = {k: getattr(d, k) for k in REVIEW_COLUMNS}
+            row["resolved_by"] = SOURCE_HAND if (d.resolution or "").strip() else ""
+            w.writerow(row)
     return p
 
 
@@ -425,23 +434,34 @@ def neighbour_graph(table: Dict[str, List[dict]], surveys: Iterable[str]) -> Tup
     return graph, outside
 
 
+def corrected_sheets(village: str) -> Set[str]:
+    """Surveys whose OUTLINE was corrected by hand (sheet_corrections.csv rows other than plot
+    re-conversions). They are never seeds and never labels."""
+    p = paths.vector_dir(village) / "sheet_corrections.csv"
+    if not p.exists():
+        return set()
+    with p.open(newline="", encoding="utf-8") as fh:
+        return {str(r.get("survey")) for r in csv.DictReader(fh) if (r.get("edge") or "") != "plots"}
+
+
 def dominating_set(graph: Dict[str, Set[str]], fixed: FrozenSet[str] = frozenset(),
-                   prefer: FrozenSet[str] = frozenset()) -> List[str]:
+                   prefer: FrozenSet[str] = frozenset(), exclude: FrozenSet[str] = frozenset()) -> List[str]:
     """Greedy dominating set: every node ends up a seed or adjacent to one.
 
     ``fixed`` nodes are seeds already (nothing to choose, they cost nothing); ``prefer`` breaks
-    ties towards nodes the analyst has already placed. Deterministic: ties then fall to the
+    ties towards nodes the analyst has already placed; ``exclude`` nodes may never be seeds
+    (hand-corrected sheets) but still need covering. Deterministic: ties then fall to the
     survey sort order.
     """
     nodes = set(graph)
     covered: Set[str] = set()
     for f in fixed:
-        if f in graph:
+        if f in graph and f not in exclude:
             covered |= {f} | graph[f]
     chosen: List[str] = []
     while nodes - covered:
         uncovered = nodes - covered
-        candidates = nodes - set(chosen) - set(fixed)
+        candidates = nodes - set(chosen) - set(fixed) - set(exclude)
         if not candidates:
             break
         # most new coverage first, then a node already placed, then survey order
@@ -464,20 +484,22 @@ def seed_plan(village: str, table: Dict[str, List[dict]], surveys: Iterable[str]
     that are not seeds."""
     surveys = list(surveys)
     placed = frozenset(str(p) for p in placed)
+    excluded = frozenset(corrected_sheets(village))
     graph, outside = neighbour_graph(table, surveys)
-    scratch = dominating_set(graph, prefer=placed)
-    additional = dominating_set(graph, fixed=placed)
+    scratch = dominating_set(graph, prefer=placed - excluded, exclude=excluded)
+    additional = dominating_set(graph, fixed=placed - excluded, exclude=excluded)
     isolated = sorted((n for n, nb in graph.items() if not nb), key=paths.survey_sort_key)
     return {
         "village": village, "sheets": len(surveys), "edges": sum(len(v) for v in graph.values()) // 2,
         "isolated_sheets": isolated,
         "placed": sorted(placed, key=paths.survey_sort_key),
+        "excluded_from_seeds_and_labels": sorted(excluded, key=paths.survey_sort_key),
         "from_scratch": {"seeds": sorted(scratch, key=paths.survey_sort_key), "n": len(scratch),
                          "already_placed": sorted(set(scratch) & placed, key=paths.survey_sort_key),
                          "to_place": sorted(set(scratch) - placed, key=paths.survey_sort_key),
-                         "labelled_parcels": sorted(placed - set(scratch), key=paths.survey_sort_key)},
+                         "labelled_parcels": sorted(placed - set(scratch) - excluded, key=paths.survey_sort_key)},
         "additional": {"seeds": sorted(additional, key=paths.survey_sort_key), "n": len(additional),
-                       "labelled_parcels": []},
+                       "labelled_parcels": sorted(placed - excluded, key=paths.survey_sort_key)},
         "printed_without_sheet": {k: sorted(v, key=paths.survey_sort_key) for k, v in sorted(outside.items(), key=lambda kv: paths.survey_sort_key(kv[0]))},
     }
 
@@ -504,12 +526,17 @@ def run(village: str, cfg: Optional[configmod.Config] = None, placed: Optional[I
         placed = list(anchors.load_anchors(village, set()))
     plan = seed_plan(village, table, surveys, placed)
     seeds_path(village).write_text(json.dumps(plan, indent=1), encoding="utf-8")
-    extra = ("## Seeds\n\nFrom scratch: %d seeds (%d already placed, %d to place: %s); %d labelled parcels.\n"
+    n_hand = sum(1 for d in disagreements if (d.resolution or "").strip())
+    extra = ("## Sources\n\nEvery table entry carries `source`: `reader` (both readers agreed) or `hand` (set by the "
+             "analyst through the review CSV, `resolved_by = hand`). The agreement figures above are computed before "
+             "resolutions and therefore exclude hand-resolved rows; %d row(s) are hand-resolved so far.\n\n"
+             "## Seeds\n\nFrom scratch: %d seeds (%d already placed, %d to place: %s); %d labelled parcels.\n"
              "Additional to the %d placed: %d more seeds: %s.\nIsolated sheets (no trusted neighbour with a sheet): %s.\n"
-             % (plan["from_scratch"]["n"], len(plan["from_scratch"]["already_placed"]), len(plan["from_scratch"]["to_place"]),
+             "Excluded from seeds and labels (outline corrected by hand): %s.\n"
+             % (n_hand, plan["from_scratch"]["n"], len(plan["from_scratch"]["already_placed"]), len(plan["from_scratch"]["to_place"]),
                 ", ".join(plan["from_scratch"]["to_place"]) or "-", len(plan["from_scratch"]["labelled_parcels"]),
                 len(plan["placed"]), plan["additional"]["n"], ", ".join(plan["additional"]["seeds"]) or "-",
-                ", ".join(plan["isolated_sheets"]) or "-"))
+                ", ".join(plan["isolated_sheets"]) or "-", ", ".join(plan["excluded_from_seeds_and_labels"]) or "-"))
     if missing:
         extra += "\nSheets missing from a reading: %s.\n" % ", ".join(missing)
     p_report = write_agreement_report(village, stats, disagreements, sample, specs, extra)

@@ -74,3 +74,16 @@ Windows are written to `<project>\_cache\imagery\<village>\` (gitignored) and lo
 `_cache\imagery\imagery_log.csv` with source, zoom, bounds, sha256, time and run id. The pin file
 `FMB_Georef\<village>\raster.json` points into the cache. `imagery.source` is `google_xyz`
 (inference only) or `geotiff:<path>`.
+
+## Changes of 2026-09-21
+
+- `append_rows` never writes a (run_id, village, survey) that is already in the file, and migrates
+  the header when the schema grows (`migrate_rows`).
+- New column `sheet_qc_reason`: a sheet the converter got wrong is logged (`mode = sheet_qc`,
+  `qc_failure_row`) with the reason, no features and no label, and stays out of every figure
+  (`metrics`, `worst10`, `distinct_summary`). Today: 613 (drawn 9.9 m short) and 47A (offset
+  arrows cut plot 3).
+- The report and `--report` print distinct labelled parcels with per-class counts (latest row per
+  parcel) next to the row count; the PR 3 gate is 300 distinct labelled parcels across two
+  villages (`report.pr3_gate`), never rows. On 2026-09-21: 14 distinct labelled parcels
+  (9 within, 5 beyond) across two villages; gate not met.
