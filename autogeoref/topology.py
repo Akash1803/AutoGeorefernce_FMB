@@ -17,6 +17,14 @@ from . import paths
 
 MIN_AREA = 0.02          # square metres: smaller than this is numerical noise
 GUARD_FRACTION = 0.25    # refuse any edit that takes more than this share of a polygon
+THIN_STRIP_M = 1.0       # metres: an overlap this thin (mean width) is a boundary disagreement, and is
+                         # clipped even from a small plot; 51's 18 m2 plot 2 kept a 0.5 m x 10 m
+                         # overlap on 582 because the strip was a quarter of the plot (2026-09-21)
+
+
+def _thin(geom, max_width=THIN_STRIP_M):
+    """True for a sliver whose mean width (2 * area / perimeter) is under `max_width`."""
+    return geom.length > 0 and 2.0 * geom.area / geom.length < max_width
 
 
 MITRE = dict(join_style=2, mitre_limit=5.0)
@@ -556,7 +564,8 @@ def resolve(parts_by_survey, settled, order, rail=(), anchors=None, tol=CONFORM_
                 new.append((props, g, note))
                 continue
             ng = _largest(g.difference(bodies[against]))
-            if ng is None or ng.is_empty or ng.geom_type != "Polygon" or inter.area / g.area > GUARD_FRACTION:
+            too_much = inter.area / g.area > GUARD_FRACTION and not _thin(inter)
+            if ng is None or ng.is_empty or ng.geom_type != "Polygon" or too_much:
                 report["refused"].append([s, props.get("poly_id"), why, round(inter.area, 2)])
                 new.append((props, g, note))
                 continue
@@ -685,7 +694,7 @@ def sanity(rigid_parts, new_parts, max_loss=MAX_LOSS):
     """
     rigid = {i: g for i, (_p, g) in enumerate(rigid_parts)}
     body_rigid = unary_union([g for _p, g in rigid_parts])
-    body_new = unary_union([g for _p, g, _n in new_parts])
+    body_new = unary_union([g.buffer(0) for _p, g, _n in new_parts if g is not None and not g.is_empty])
     notes = []
     loss = (body_rigid.area - body_new.area) / body_rigid.area if body_rigid.area else 0.0
     if loss > max_loss:
@@ -697,27 +706,44 @@ def sanity(rigid_parts, new_parts, max_loss=MAX_LOSS):
     parts = list(new_parts)
     bad = set()
     for i, (_p, g, _n) in enumerate(parts):
-        if g is None or g.is_empty or g.geom_type != "Polygon" or not g.is_valid or _spiky(g):
+        if g is None or g.is_empty or g.geom_type != "Polygon" or not g.is_valid:
             bad.add(i)
+        elif _spiky(g) and not (i in rigid and _spiky(rigid[i])):
+            bad.add(i)                          # a wedge the sheet itself draws (47A plot 3) is not a fault
     for i in range(len(parts)):
         for j in range(i + 1, len(parts)):
             gi, gj = parts[i][1], parts[j][1]
             if gi is not None and gj is not None and gi.intersection(gj).area > SIBLING_OVERLAP_M2:
                 bad.add(i if gi.area < gj.area else j)
+    good = [parts[j][1] for j in range(len(parts)) if j not in bad and parts[j][1] is not None and not parts[j][1].is_empty]
     for i in sorted(bad):
         props, _g, note = parts[i]
-        fallback = _largest(rigid[i].intersection(body_new)) if i in rigid else None
+        # first choice: the space the sound siblings leave inside the resolved outline, which keeps
+        # the survey in one piece; otherwise the rigid plot clipped to the outline
+        # the siblings are shrunk by a millimetre so the repaired plot overlaps them by a hair and
+        # the survey unions to one piece; exact differences leave sub-centimetre slits (51, 2026-09-21)
+        remainder = _largest(body_new.difference(unary_union(good).buffer(-0.001))) if good else None
+        fallback = None
+        if (remainder is not None and not remainder.is_empty and remainder.geom_type == "Polygon" and remainder.is_valid
+                and not remainder.interiors and i in rigid
+                and 0.5 * rigid[i].area <= remainder.area <= 1.25 * rigid[i].area
+                and remainder.intersection(rigid[i]).area >= 0.5 * remainder.area
+                and (not _spiky(remainder) or _spiky(rigid[i]))):
+            fallback = remainder
+        if fallback is None:
+            fallback = _largest(rigid[i].intersection(body_new)) if i in rigid else None
         if fallback is None or fallback.is_empty or fallback.geom_type != "Polygon":
             fallback = rigid.get(i, _g)
         parts[i] = (props, fallback, (note + ",rigid-clipped").strip(","))
+        good.append(fallback)
     for i in sorted(bad):
         # a fallback plot must not sit on a sibling that received a filled piece: trim it
         props, g, note = parts[i]
         for j, (_pj, gj, _nj) in enumerate(parts):
             if j == i or gj is None or gj.is_empty or g is None:
                 continue
-            if g.intersection(gj).area > SIBLING_OVERLAP_M2:
-                trimmed = _largest(g.difference(gj))
+            if g.intersection(gj).area > 0.05:
+                trimmed = _largest(g.difference(gj.buffer(-0.001)))
                 if trimmed is not None and not trimmed.is_empty and trimmed.geom_type == "Polygon":
                     g = trimmed
         parts[i] = (props, g, note)

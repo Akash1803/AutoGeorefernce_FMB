@@ -76,3 +76,26 @@ def test_conform_as_body_refuses_when_it_would_overlap():
     settled = {"E": _sq(19.0, -5, 40, 15)}       # already overlapping by a metre
     parts, why = topology.conform_as_body("x", rigid, settled, anchors=set(settled), anchor_tol=1.5)
     assert parts is None or all(p[1].intersection(settled["E"]).area < 0.5 for p in parts)
+
+
+def test_a_thin_overlap_is_clipped_even_from_a_small_plot():
+    # an 18 m2 plot (2 x 9) sits 0.5 m into an anchor along its 9 m top edge: 25 % of its area,
+    # but a strip half a metre wide, which is a boundary disagreement, not a mis-placement
+    plot = Polygon([(0, 0), (9, 0), (9, 2), (0, 2)])
+    anchor = Polygon([(-5, 1.5), (15, 1.5), (15, 10), (-5, 10)])
+    out, report = topology.resolve({"p": [({"poly_id": 1, "plot_no": "2"}, plot)]}, {"A": anchor}, ["p"], anchors={"A"})
+    g = out["p"][0][1]
+    assert g.intersection(anchor).area < 0.01 and abs(g.area - 13.5) < 0.05
+    assert not report["refused"]
+    assert topology._thin(plot.intersection(anchor)) and not topology._thin(Polygon([(0, 0), (4, 0), (4, 4), (0, 4)]))
+
+
+def test_a_repaired_plot_fills_exactly_the_space_its_siblings_leave():
+    rigid = [({"plot_no": "1"}, _sq(0, 0, 20, 20)), ({"plot_no": "2"}, _sq(20, 0, 24, 20))]
+    # after resolve: plot 1 conformed (slightly wider), plot 2 came back invalid
+    conformed1 = _sq(0, 0, 20.3, 20)
+    broken2 = Polygon([(20, 0), (24, 20), (24, 0), (20, 20)])                        # a bow-tie, invalid
+    parts, notes = topology.sanity(rigid, [({"plot_no": "1"}, conformed1, "conformed"), ({"plot_no": "2"}, broken2, "")])
+    body = parts[0][1].union(parts[1][1])
+    assert body.geom_type == "Polygon", "the survey stays in one piece"
+    assert parts[1][1].intersection(parts[0][1]).area < 0.05 and abs(parts[1][1].area - 3.7 * 20) < 0.5
