@@ -196,6 +196,96 @@ def extract_lines(page, clip=None):
 
 
 # ----------------------------------------------------------------------------
+# annotation arrows and slivers (2026-09-21, after 47A plot 3)
+# ----------------------------------------------------------------------------
+HEAD_ANGLE_DEG = (4.0, 60.0)     # an arrowhead stroke leans back along its line by this much
+SLIVER_M2 = 2.5                  # faces smaller than this are folded into a neighbour
+
+
+def drop_arrows(segs, tol):
+    """Remove offset arrows from the polygonisation input; returns (kept, dropped).
+
+    FMB sheets draw offset measurements to reference stones as thin black lines with a
+    two-stroke arrowhead at the far end, the foot just inside the parcel. Polygonised, the
+    foot snaps onto a nearby line and the arrow cuts a sliver off a real plot (47A plot 3,
+    2026-09-21). An arrow is a line with at least two short strokes attached at one end,
+    each leaning back along the line by HEAD_ANGLE_DEG, on opposite sides of it.
+    """
+    head_max = 5.0 * tol
+    short = [i for i, s in enumerate(segs) if math.dist(s['p0'], s['p1']) <= head_max]
+    drop = set()
+    for i, s in enumerate(segs):
+        L = math.dist(s['p0'], s['p1'])
+        if L <= 1.5 * head_max or i in drop:
+            continue
+        for tip, other in ((s['p0'], s['p1']), (s['p1'], s['p0'])):
+            ux, uy = (other[0] - tip[0]) / L, (other[1] - tip[1]) / L
+            heads, sides, far = [], [], []
+            for j in short:
+                if j == i or j in drop:
+                    continue
+                h = segs[j]
+                for a, b in ((h['p0'], h['p1']), (h['p1'], h['p0'])):
+                    if math.dist(a, tip) > tol:
+                        continue
+                    hl = math.dist(a, b)
+                    if hl < 1e-6:
+                        break
+                    vx, vy = (b[0] - a[0]) / hl, (b[1] - a[1]) / hl
+                    ang = math.degrees(math.acos(max(-1.0, min(1.0, ux * vx + uy * vy))))
+                    if HEAD_ANGLE_DEG[0] <= ang <= HEAD_ANGLE_DEG[1]:
+                        heads.append(j); sides.append(ux * vy - uy * vx > 0); far.append(b)
+                    break
+            if len(heads) >= 2 and len(set(sides)) == 2:
+                drop.add(i); drop.update(heads)
+                for j in short:                              # the bar closing the head, if drawn
+                    if j in drop:
+                        continue
+                    h = segs[j]
+                    if (any(math.dist(h['p0'], f) <= tol for f in far)
+                            and any(math.dist(h['p1'], f) <= tol for f in far)):
+                        drop.add(j)
+                break
+    return [s for i, s in enumerate(segs) if i not in drop], [segs[i] for i in sorted(drop)]
+
+
+def merge_slivers(polys, min_area=SLIVER_M2):
+    """Fold faces smaller than `min_area` (same units as `area`) into the neighbour that shares
+    the longest edge with them; returns (polys, merged). A sliver with no neighbour stays."""
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    geoms = [Polygon(p['rings'][0], p['rings'][1:]).buffer(0) for p in polys]
+    merged, changed = 0, True
+    while changed:
+        changed = False
+        for i, g in enumerate(geoms):
+            if g is None or g.is_empty or g.area >= min_area:
+                continue
+            best, bl = None, 0.0
+            for j, h in enumerate(geoms):
+                if j == i or h is None or h.is_empty:
+                    continue
+                shared = g.boundary.intersection(h.boundary).length
+                if shared > bl:
+                    best, bl = j, shared
+            if best is None or bl < 1e-6:
+                continue
+            u = unary_union([geoms[best], g]).buffer(0)
+            if u.geom_type != 'Polygon':
+                continue
+            geoms[best], geoms[i] = u, None
+            merged += 1; changed = True
+    out = []
+    for g in geoms:
+        if g is None or g.is_empty:
+            continue
+        rings = [[list(c) for c in g.exterior.coords]] + [[list(c) for c in r.coords] for r in g.interiors]
+        out.append({'area': g.area, 'rings': rings})
+    out.sort(key=lambda p: -p['area'])
+    return out, merged
+
+
+# ----------------------------------------------------------------------------
 # polygonisation (planar face traversal)
 # ----------------------------------------------------------------------------
 def polygonize(segs, tol):
@@ -555,10 +645,16 @@ def run(pdf_path, scale, out_dir, kind='auto', glyphlib=None, area=None,
 
     segs = extract_lines(page, clip=clip)
     black = [s for s in segs if s['layer'] in ('survey_boundary_main', 'subdivision_line')]
+    black, arrows = drop_arrows(black, tol)
+    for a_ in arrows:
+        a_['layer'] = 'annotation_arrow'            # kept in the lines file, out of the polygons
+    n_arrows = len(arrows)
     polys, dangles, st = polygonize(black, tol)
     for p in polys:
         p['area'] *= M * M
         p['rings'] = [[[round(x * M, 4), round(y * M, 4)] for x, y in r] for r in p['rings']]
+    polys, n_slivers = merge_slivers(polys, SLIVER_M2)
+    st['arrows_dropped'], st['slivers_merged'] = n_arrows, n_slivers
 
     # --- plot numbers ---
     labels = []          # each: {text, pt(metres), kind}
@@ -707,6 +803,7 @@ def run(pdf_path, scale, out_dir, kind='auto', glyphlib=None, area=None,
           'metres_per_pdf_point': round(M, 9),
           'snap_tolerance_m': round(tol * M, 4),
           'max_node_displacement_m': round(st['shift'] * M, 4),
+          'arrows_dropped': n_arrows, 'slivers_merged': n_slivers,
           'stated_area_sqm': area, 'polygon_total_sqm': round(total, 2),
           'crs_note': ('Local planar CRS in ground metres, origin at page '
                        'bottom-left. NOT georeferenced -- apply a 2-point '
@@ -765,6 +862,7 @@ def run(pdf_path, scale, out_dir, kind='auto', glyphlib=None, area=None,
           f"{st['shift'] * M:.3f} m (tol {tol * M:.2f} m) | components {st['components']}")
     print(f'  wrote {out_dir}/{stem}_parcels.geojson (+ .csv, _lines.geojson, _preview.png)')
     run.last_stats = {'polygons': len(feats), 'numbered': numbered, 'unplaced_labels': unplaced,
+                      'arrows_dropped': n_arrows, 'slivers_merged': n_slivers,
                       'total_sqm': round(total, 2), 'max_node_shift_m': round(st['shift'] * M, 4),
                       'components': st['components'], 'text_class': cls,
                       'review': sum(1 for f in feats if f['properties']['review_needed'])}
