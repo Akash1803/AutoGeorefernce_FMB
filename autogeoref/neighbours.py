@@ -47,9 +47,15 @@ def printed(village, survey):
 
 
 def are_neighbours(village, a, b):
-    """True / False / None (unknown, because at least one sheet was not transcribed)."""
+    """True / False / None (unknown, because neither sheet was transcribed).
+
+    A transcribed sheet's list is complete (two readers agreed on it), so when either sheet has
+    been read the answer is definite: they are neighbours only if one prints the other. On
+    2026-09-21 in Thirukatchur, where only four sheets were read, the old rule returned None for
+    every pair with an unread sheet and 569C was matched to 609, 1.1 km away.
+    """
     table = load(village)
-    if not table or a not in table or b not in table:
+    if not table or (a not in table and b not in table):
         return None
     return str(b).upper() in printed(village, a) or str(a).upper() in printed(village, b)
 

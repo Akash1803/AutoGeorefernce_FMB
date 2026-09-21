@@ -35,3 +35,17 @@ def test_side_and_side_vector():
     assert neighbours.side(VILLAGE, "171", "170") == "S"
     assert neighbours.side_vector("N") == (0.0, 1.0)
     assert neighbours.side_vector("SE") == pytest.approx((0.7071, -0.7071), abs=1e-3)
+
+
+
+def test_a_read_sheet_is_the_complete_list_of_its_neighbours(tmp_path, monkeypatch):
+    import json
+    from autogeoref import paths
+    monkeypatch.setattr(paths, "PROJECT", tmp_path)
+    d = tmp_path / "FMB_Vector" / "V" / "neighbour_transcription"; d.mkdir(parents=True)
+    (d / "nb_override_V.json").write_text(json.dumps({"613": [{"number": "565", "side": "E", "readers": 2}]}), encoding="utf-8")
+    neighbours._CACHE.pop("V", None)
+    assert neighbours.are_neighbours("V", "613", "565") is True
+    assert neighbours.are_neighbours("V", "613", "609") is False, "613 was read and does not print 609"
+    assert neighbours.are_neighbours("V", "609", "613") is False
+    assert neighbours.are_neighbours("V", "609", "610") is None, "neither sheet was read"
