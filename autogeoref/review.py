@@ -185,7 +185,9 @@ def update_tracker(rows, workbook=None):
     parts["xl/worksheets/sheet1.xml"] = sheet.encode("utf-8")
     parts["xl/workbook.xml"] = re.sub(rb'<calcPr(?![^>]*fullCalcOnLoad)', b'<calcPr fullCalcOnLoad="1"',
                                       parts["xl/workbook.xml"], count=1)
-    backup = paths.logs_dir() / "tracker_backups"
+    # the project tracker is backed up under _logs; any other workbook (a test copy, a trial)
+    # is backed up beside itself, so test runs never write into the project folder
+    backup = paths.logs_dir() / "tracker_backups" if workbook == paths.TRACKER else workbook.parent / "backups"
     backup.mkdir(parents=True, exist_ok=True)
     shutil.copy2(workbook, backup / (workbook.stem + "_before_autogeoref_%s.xlsx"
                                      % datetime.datetime.now().strftime("%Y%m%d%H%M%S")))
