@@ -74,8 +74,12 @@ def comparison_table(rows: List[Dict[str, object]], acceptance_m: float = 3.0) -
     villages = sorted({str(r.get("village")) for r in rows})
     for v in villages:
         vrows = [r for r in rows if str(r.get("village")) == v]
-        band_free = [r for r in vrows if not str(r.get("stretch_band", "")).startswith("5-")]
-        for set_name, subset in (("all labelled", vrows), ("without 5-10 % tier", band_free)):
+        current = [r for r in vrows if str(r.get("backfilled", "0")) in ("", "0")]
+        band_free = [r for r in current if not str(r.get("stretch_band", "")).startswith("5-")]
+        # backfilled rows come from runs of older code and are kept for the record, not as the baseline
+        for set_name, subset in (("current code, all labelled", current),
+                                 ("current code, without 5-10 % tier", band_free),
+                                 ("all rows incl. backfilled", vrows)):
             m = metrics(subset, acceptance_m)
             out.append(dict(village=v, row_set=set_name, method="rule-based", **m))
             if any(r.get("p_within") not in (None, "") for r in subset):
@@ -91,7 +95,10 @@ def cause_from_notes(notes: str) -> str:
     return "see notes"
 
 
-def worst10(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+def worst10(rows: List[Dict[str, object]], include_backfilled: bool = False) -> List[Dict[str, object]]:
+    """The ten largest errors against the FMB-exact reference, current code only unless asked."""
+    if not include_backfilled:
+        rows = [r for r in rows if str(r.get("backfilled", "0")) in ("", "0")]
     scored = [(r, _f(r.get("err_fmb_m"))) for r in rows]
     scored = [(r, e) for r, e in scored if e is not None]
     scored.sort(key=lambda re: -re[1])

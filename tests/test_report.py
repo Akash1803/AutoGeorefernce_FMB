@@ -26,10 +26,21 @@ def test_metrics_count_what_the_colour_rule_gets_right():
 
 def test_comparison_table_reports_each_village_with_and_without_the_middle_tier():
     t = report.comparison_table(ROWS)
-    assert [(l["village"], l["row_set"]) for l in t] == [("A", "all labelled"), ("A", "without 5-10 % tier"),
-                                                          ("B", "all labelled"), ("B", "without 5-10 % tier")]
+    assert [(l["village"], l["row_set"]) for l in t] == [
+        ("A", "current code, all labelled"), ("A", "current code, without 5-10 % tier"), ("A", "all rows incl. backfilled"),
+        ("B", "current code, all labelled"), ("B", "current code, without 5-10 % tier"), ("B", "all rows incl. backfilled")]
     assert t[0]["labelled"] == 6 and t[1]["labelled"] == 5
     assert all(l["method"] == "rule-based" for l in t)
+
+
+def test_backfilled_rows_are_kept_for_the_record_but_not_as_the_baseline():
+    rows = ROWS + [dict(_row("A", "9", "green", 150.0), backfilled="1")]
+    t = report.comparison_table(rows)
+    current = next(l for l in t if l["village"] == "A" and l["row_set"] == "current code, all labelled")
+    everything = next(l for l in t if l["village"] == "A" and l["row_set"] == "all rows incl. backfilled")
+    assert current["rows"] == 6 and everything["rows"] == 7
+    assert all(x["survey"] != "9" for x in report.worst10(rows))
+    assert any(x["survey"] == "9" for x in report.worst10(rows, include_backfilled=True))
 
 
 def test_worst10_is_sorted_and_names_a_cause():
@@ -45,4 +56,4 @@ def test_report_file_starts_with_the_accuracy_cap_sentence(tmp_path):
     text = p.read_text(encoding="utf-8")
     assert report.BOILERPLATE in text
     assert text.index(report.BOILERPLATE) < text.index("## Comparison")
-    assert "Worst 10" in text and "| A | all labelled |" in text
+    assert "Worst 10" in text and "| A | current code, all labelled |" in text
