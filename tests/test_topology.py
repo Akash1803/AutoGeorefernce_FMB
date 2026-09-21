@@ -115,6 +115,145 @@ def test_gap_fill_strips_have_straight_ends():
     from shapely.geometry import Polygon as P
     a = P([(0, 0), (10, 0), (10, 10), (0, 10)]); b = P([(10.3, 0), (20, 0), (20, 10), (10.3, 10)])
     out, rep = topology.fix({"A": a, "B": b}, movable={"A", "B"}, rail=set())
-    filled = out["A"] if out["A"].area > a.area + 0.1 else out["B"]
-    assert len(filled.exterior.coords) == 5, "a rectangle plus a straight strip is still a rectangle"
-    assert filled.area == pytest.approx(100.0 + 3.0, abs=0.05)
+    # which side receives the strip is a tie (both border it equally), so test the result, not the side
+    assert out["A"].area + out["B"].area == pytest.approx(200.0, abs=0.05), "the 3 m2 gap is filled"
+    assert out["A"].distance(out["B"]) < 1e-9 and out["A"].intersection(out["B"]).area < 1e-6
+    for g in out.values():
+        assert len(g.exterior.coords) == 5, "a rectangle plus a straight strip is still a rectangle"
+
+
+
+def _ring_keys(g):
+    return {(round(x, 6), round(y, 6)) for x, y in g.exterior.coords}
+
+
+def test_conform_makes_a_shared_boundary_identical():
+    """B sits 0.3 m off A with a bend of its own; A has a mid-edge vertex B lacks."""
+    A = Polygon([(0, 0), (10, 0), (10, 6), (10, 10), (0, 10)])                 # settled, vertex at (10,6)
+    B = Polygon([(10.3, 0.2), (20, 0), (20, 10), (10.4, 10.3), (10.25, 4.0)])  # movable, a bend at y=4
+    out, rep = topology.conform({"B": [({"poly_id": 1}, B)]}, {"A": A}, ["B"], anchors=())
+    nb = out["B"][0][1]
+    assert nb.is_valid and out["B"][0][2] == "conformed"
+    assert nb.intersection(A).area < 1e-6 and nb.distance(A) < 1e-9, "touching, not crossing"
+    keys = _ring_keys(nb)
+    assert (10.0, 0.0) in keys and (10.0, 10.0) in keys, "corners snapped onto A's corners"
+    assert (10.0, 6.0) in keys, "A's mid-edge vertex inserted into B"
+    assert all(abs(x - 10.0) < 1e-9 for x, y in keys if x < 15), "the whole shared run lies on x = 10"
+    assert rep["conformed"]["B"]["max_move_m"] < 0.6
+
+
+def test_conform_keeps_a_parcels_plots_stitched():
+    """Moving the outer ring must move the same vertices in every plot that shares them."""
+    A = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    left = Polygon([(10.3, 0), (15, 0), (15, 10), (10.3, 10)])
+    right = Polygon([(15, 0), (20, 0), (20, 10), (15, 10)])
+    out, _rep = topology.conform({"B": [({"poly_id": 1}, left), ({"poly_id": 2}, right)]}, {"A": A}, ["B"])
+    nl, nr = out["B"][0][1], out["B"][1][1]
+    assert nl.distance(A) < 1e-9 and nl.intersection(A).area < 1e-6
+    assert nl.intersection(nr).area < 1e-6 and nl.distance(nr) < 1e-9, "internal boundary still shared"
+    assert nr.equals(right), "the plot away from the shared boundary is untouched"
+    from shapely.ops import unary_union
+    body = unary_union([nl, nr])
+    assert body.geom_type == "Polygon" and len(body.interiors) == 0, "no hole opened between the plots"
+
+
+def test_conform_never_touches_the_settled_parcel_and_refuses_to_eat_a_plot():
+    A = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    sliver = Polygon([(10.3, 4.0), (10.7, 4.0), (10.7, 4.5), (10.3, 4.5)])      # 0.4 x 0.5 m plot
+    big = Polygon([(10.7, 0), (20, 0), (20, 10), (10.7, 10)])
+    out, rep = topology.conform({"B": [({"poly_id": 1}, sliver), ({"poly_id": 2}, big)]}, {"A": A}, ["B"])
+    assert not out["B"][0][1].is_empty and out["B"][0][1].area > 0.1, "the small plot survives"
+    assert A.equals(Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]))
+
+
+def test_conform_orders_by_certainty_and_settles_each_parcel_for_the_next():
+    A = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    B = Polygon([(10.2, 0), (20, 0), (20, 10), (10.2, 10)])
+    C = Polygon([(20.3, 0), (30, 0), (30, 10), (20.3, 10)])
+    out, _rep = topology.conform({"B": [({}, B)], "C": [({}, C)]}, {"A": A}, ["B", "C"])
+    nb, nc = out["B"][0][1], out["C"][0][1]
+    assert nb.distance(A) < 1e-9 and nc.distance(nb) < 1e-9
+    assert nb.intersection(nc).area < 1e-6 and (20.0, 0.0) in _ring_keys(nc)
+
+
+
+def test_resolve_clips_a_real_crossing_from_the_less_certain_parcel_only():
+    A = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])                     # team parcel
+    B = Polygon([(10, 0), (20, 0), (20, 10), (10, 10)])                   # certain, shares A's edge exactly
+    C = Polygon([(18.5, 0), (30, 0), (30, 10), (18.5, 10)])               # 1.5 m into B: beyond tolerance
+    out, rep = topology.resolve({"B": [({"poly_id": 1}, B)], "C": [({"poly_id": 1}, C)]}, {"A": A}, ["B", "C"])
+    nb, nc = out["B"][0][1], out["C"][0][1]
+    assert nb.equals(B), "the more certain parcel keeps its shape"
+    assert nc.intersection(nb).area < 1e-6 and nc.area == pytest.approx(C.area - 15.0, abs=0.01)
+    assert rep["clips"] and rep["clips"][0][0] == "C"
+
+
+def test_resolve_fills_an_enclosed_sliver_by_exact_union():
+    A = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    B = Polygon([(10, 0), (20, 0), (20, 10), (10, 10)])
+    # C sits below both but stops 0.3 m short between x = 4 and x = 16: a thin enclosed hole
+    C = Polygon([(0, -10), (20, -10), (20, 0), (16, 0), (16, -0.3), (4, -0.3), (4, 0), (0, 0)])
+    out, rep = topology.resolve({"C": [({"poly_id": 1}, C)]}, {"A": A, "B": B}, ["C"], anchors=set(), tol=0.2)
+    nc = out["C"][0][1]
+    from shapely.ops import unary_union
+    u = unary_union([A, B, nc])
+    assert u.geom_type == "Polygon" and len(u.interiors) == 0, "the sliver hole is closed"
+    assert rep["fills"] and nc.area == pytest.approx(C.area + 12 * 0.3, abs=0.01)
+
+
+def test_resolve_keeps_plots_of_a_parcel_exactly_stitched():
+    """Nothing in the stage may make two plots of one parcel drift apart (the 46A defect)."""
+    A = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    plots = [({"poly_id": i}, Polygon([(10.3 + 2 * i, 0.1), (12.3 + 2 * i, 0.1), (12.3 + 2 * i, 10.2), (10.3 + 2 * i, 10.2)]))
+             for i in range(5)]
+    out, _rep = topology.resolve({"B": plots}, {"A": A}, ["B"])
+    geoms = [g for _p, g, _n in out["B"]]
+    from shapely.ops import unary_union
+    import itertools
+    assert sum(g1.intersection(g2).area for g1, g2 in itertools.combinations(geoms, 2)) < 1e-9
+    body = unary_union(geoms)
+    assert body.geom_type == "Polygon" and len(body.interiors) == 0
+    assert body.distance(A) < 1e-9 and body.intersection(A).area < 1e-6
+
+
+
+def test_conform_inserts_whichever_way_round_the_edge_is_keyed():
+    """The mirror image of the shared-boundary case: sorted coordinate keys now run against the
+    ring direction, and the edge's first vertex is one that moves. 171 lost 48A's corner this way."""
+    A = Polygon([(0, 0), (-10, 0), (-10, 6), (-10, 10), (0, 10)])              # settled, west side
+    B = Polygon([(-10.3, 0.2), (-20, 0), (-20, 10), (-10.4, 10.3), (-10.25, 4.0)])
+    out, rep = topology.conform({"B": [({"poly_id": 1}, B)]}, {"A": A}, ["B"], anchors=())
+    nb = out["B"][0][1]
+    keys = _ring_keys(nb)
+    assert (-10.0, 6.0) in keys, "A's mid-edge vertex inserted into B"
+    assert nb.is_valid and nb.intersection(A).area < 1e-6 and nb.distance(A) < 1e-9
+    assert rep["conformed"]["B"]["vertices_inserted"] >= 1
+
+
+
+def test_conform_keeps_a_t_junction_stitched():
+    """Plot Q's corners lie on plot P's left edge with no vertex there. When they move onto the
+    settled boundary, P's edge must bend with them (46A opened a 100 m hairline this way)."""
+    from shapely.geometry import LineString, Point
+    A = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])                       # settled
+    P = Polygon([(10.3, 0), (20, 0), (20, 10), (10.3, 10)])                 # no vertices at y = 4, 7
+    Q = Polygon([(10.3, 4), (14, 4), (14, 7), (10.3, 7)])                   # its west corners sit on P's edge
+    P = P.difference(Q)                                                     # P wraps Q but keeps no vertices there? it does; so use the raw P below
+    P_raw = Polygon([(10.3, 0), (20, 0), (20, 10), (10.3, 10)])
+    out, _rep = topology.conform({"B": [({"poly_id": 1}, P_raw), ({"poly_id": 2}, Q)]}, {"A": A}, ["B"], anchors=())
+    nP, nQ = out["B"][0][1], out["B"][1][1]
+    assert nQ.distance(A) < 1e-9, "Q's west corners moved onto A"
+    edge = LineString(nP.exterior.coords)
+    for c in nQ.exterior.coords:
+        if abs(c[0] - 10.0) < 1e-6:
+            assert edge.distance(Point(c)) < 1e-6, "P's edge did not follow Q's moved corner %s" % (c,)
+
+
+def test_node_parts_merges_near_duplicate_corners_and_inserts_t_junctions():
+    P = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    Q = Polygon([(10.02, 3), (15, 3), (15, 6), (10.0, 6)])                   # (10.02,3) is 2 cm off P's corner line
+    out, changed = topology.node_parts([P, Q])
+    assert changed
+    nP, nQ = out
+    assert (10.0, 6.0) in {(round(x, 6), round(y, 6)) for x, y in nP.exterior.coords}, "T-junction vertex inserted into P"
+    assert nP.is_valid and nQ.is_valid

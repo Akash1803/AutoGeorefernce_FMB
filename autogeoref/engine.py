@@ -7,6 +7,7 @@ never rewritten; Puvi only ever suggests a starting guess and a reporting distan
 """
 import datetime
 import math
+from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
@@ -659,6 +660,7 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
             continue
         theta, t = adjusted[s]["theta"], adjusted[s]["t"]
         row["heading_deg"] = round(theta, 3)          # the adjusted heading, not the start guess
+        row["pose_tx"], row["pose_ty"] = round(float(t[0]), 4), round(float(t[1]), 4)
         mine = [v for k, v in residuals.items() if s in k]
         row["boundary_rms_m"] = round(min(v["rms"] for v in mine), 3) if mine else None
         partners = sorted({k[0] if k[1] == s else k[1] for k in residuals if s in k},
@@ -694,9 +696,9 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
         # rigid 48A and still overlapped Akash's real 48A by 19.5 m2
         geoms.update({s: team_geometry(village, a) for s, a in anchor_map.items()})
         rail = {s for s in geoms if s in _rail_parcels(village)}
-        fixed, report = topology.fix(geoms, movable=set(written), rail=rail)
-        topology.report_rail_conflicts(village, report)
-        edited = write_topology(village, written, adjusted, geoms, fixed)
+        order = sorted(written, key=lambda s: (next((int(r.get("pass") or 99) for r in rows if r["survey"] == s), 99),
+                                               paths.survey_sort_key(s)))
+        edited = write_topology(village, written, adjusted, {s: geoms[s] for s in anchor_map}, order, rail)
         for row in rows:
             if row["survey"] in edited:
                 row["notes"] = " | ".join(x for x in (row.get("notes"), "topology: " + edited[row["survey"]]) if x)
@@ -727,43 +729,116 @@ def team_geometry(village, anchor):
     return anchors.placed_geometry(village, anchor)
 
 
-def write_topology(village, written, adjusted, original, fixed):
-    """Rewrite the parcels layer of each tool-written file with its topology-fixed plots.
+def write_topology(village, written, adjusted, anchor_bodies, order, rail=()):
+    """Rewrite the parcels layer of each tool-written file with its topology-resolved plots.
 
-    The edges layer is left as the rigid sheet: the printed FMB lengths are the point of it.
-    Anchors are never in `written`, so the team's files are never touched here.
-    Returns {survey: summary} for the surveys whose geometry changed.
+    Only the parcels layer changes; the edges layer stays the rigid sheet, because the printed
+    FMB lengths are the point of it. Anchors are never in `written`, so the team's files are never
+    touched. Returns {survey: summary} for the surveys whose geometry changed.
     """
+    rigid = {}
+    for s in written:
+        theta, t = adjusted[s]["theta"], adjusted[s]["t"]
+        rigid[s] = [(props, fit.apply_pose(g, theta, t)) for props, g in sheets.load_sheet(village, s)]
+    resolved, report = topology.resolve(rigid, anchor_bodies, order, rail=rail, anchors=set(anchor_bodies))
+    topology.report_rail_conflicts(village, report)
     edited = {}
     for s in written:
-        if s not in fixed or fixed[s].equals(original[s]):
-            continue
-        theta, t = adjusted[s]["theta"], adjusted[s]["t"]
-        parts = [(props, fit.apply_pose(g, theta, t)) for props, g in sheets.load_sheet(village, s)]
-        new_parts = topology.apply_to_parts(parts, fixed[s], original[s])
+        new_parts = resolved.get(s) or [(p, g, "") for p, g in rigid[s]]
         notes = sorted({n for _p, _g, n in new_parts if n})
+        if s in report.get("conformed", {}):
+            notes.append("conform max %.2f m" % report["conformed"][s]["max_move_m"])
         if not notes:
             continue
         target = paths.output_path(village, s)
         old = gpd.read_file(target, layer="parcels")
-        geoms_by_id = {}
-        for (props, g, n) in new_parts:
-            geoms_by_id[(props.get("poly_id"), props.get("plot_no"))] = (g, n)
-        new_geom, topo = [], []
-        for _, r in old.iterrows():
-            g, n = geoms_by_id.get((r.get("poly_id"), r.get("plot_no")), (r.geometry, ""))
-            new_geom.append(g); topo.append(n or "clean")
+
+        def pkey(pid, pno):
+            # None, NaN and '' are the same missing plot number; ids compare as text
+            missing = pno is None or pno == "" or (isinstance(pno, float) and pno != pno)
+            return (str(pid), "" if missing else str(pno))
+
+        geoms_by_id = {pkey(props.get("poly_id"), props.get("plot_no")): (g, n) for props, g, n in new_parts}
+        new_geom, topo, unmatched = [], [], 0
+        for i, (_, r) in enumerate(old.iterrows()):
+            hit = geoms_by_id.get(pkey(r.get("poly_id"), r.get("plot_no")))
+            if hit is None and len(old) == len(new_parts):
+                hit = (new_parts[i][1], new_parts[i][2])      # same sheet order as write_parcels
+            if hit is None:
+                unmatched += 1
+                hit = (r.geometry, "unmatched")
+            new_geom.append(hit[0]); topo.append(hit[1] or "clean")
+        if unmatched:
+            notes.append("%d plot(s) unmatched" % unmatched)
         old = old.set_geometry(new_geom)
         old["topo_edit"] = topo
         old["area_sqm"] = old.geometry.area.round(3)
         old["perimeter_m"] = old.geometry.length.round(3)
 
-        def writer(path):
-            old.to_file(path, layer="parcels", driver="GPKG")
-            gpd.read_file(target, layer="edges").to_file(path, layer="edges", driver="GPKG")
+        def writer(path, frame=old, src=target):
+            frame.to_file(path, layer="parcels", driver="GPKG")
+            gpd.read_file(src, layer="edges").to_file(path, layer="edges", driver="GPKG")
 
         if files.safe_write(target, writer):
             edited[s] = ",".join(notes)
+    return edited
+
+
+def pose_from_edges(village, survey, gpkg_path):
+    """Exact pose of a tool-written file, from its edges layer.
+
+    The parcels layer may have been topology-edited, and a rigid fit to it was 0.5 degrees off
+    for 47B on 2026-09-21 (a metre over its length). The edges layer is the rigid sheet as
+    placed, so polygonising each plot's edges and fitting to that returns the pose to the mm.
+    """
+    from shapely.ops import polygonize
+    ed = gpd.read_file(gpkg_path, layer="edges")
+    polys = []
+    for (pid, pn), grp in ed.groupby(["poly_id", "plot_no"], dropna=False):
+        pg = list(polygonize(unary_union(list(grp.geometry))))
+        if pg:
+            polys.append({"poly_id": pid, "plot_no": pn, "geometry": max(pg, key=lambda q: q.area)})
+    tmp = Path(gpkg_path).with_name("_pose_from_edges_%s.gpkg" % survey)
+    gpd.GeoDataFrame(polys, geometry="geometry", crs="EPSG:32644").to_file(tmp, driver="GPKG")
+    try:
+        pose = anchors.pose_from_geometry(village, survey, tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return {"theta": float(pose[0]), "t": np.asarray(pose[1], float)}
+
+
+def retopology(village, surveys=None):
+    """Re-run the topology stage on files the tool already wrote, without placing anything again.
+
+    The pose comes from the status row (pose_tx/pose_ty written since 2026-09-21) or, for older
+    files, from a rigid fit of the sheet to the written geometry. Anchors take part as the team's
+    geometry and are never written. Returns {survey: summary}.
+    """
+    rows = review.read_status(village)
+    tool_fps = review.tool_written_fingerprints(village)
+    anchor_map = anchors.load_anchors(village, tool_fps)
+    placed_rows = [r for r in rows if r.get("status") == "placed" and (surveys is None or r["survey"] in surveys)]
+    adjusted = {}
+    for r in placed_rows:
+        s = r["survey"]
+        if r.get("pose_tx") and r.get("pose_ty"):
+            adjusted[s] = {"theta": float(r["heading_deg"]), "t": np.array([float(r["pose_tx"]), float(r["pose_ty"])])}
+        else:
+            adjusted[s] = pose_from_edges(village, s, paths.output_path(village, s))
+    written = list(adjusted)
+    geoms = {s: unary_union([fit.apply_pose(g, adjusted[s]["theta"], adjusted[s]["t"])
+                             for _p, g in sheets.load_sheet(village, s)]) for s in written}
+    geoms.update({s: team_geometry(village, a) for s, a in anchor_map.items()})
+    rail = {s for s in geoms if s in _rail_parcels(village)}
+    order = sorted(written, key=lambda s: (next((int(r.get("pass") or 99) for r in placed_rows if r["survey"] == s), 99),
+                                           paths.survey_sort_key(s)))
+    edited = write_topology(village, written, adjusted, {s: geoms[s] for s in anchor_map}, order, rail)
+    for r in rows:
+        if r["survey"] in edited:
+            base = (r.get("notes") or "").split(" | topology:")[0]
+            r["notes"] = base + " | topology: " + edited[r["survey"]]
+            r["fp_placed"] = r["fp_final"] = anchors.fingerprint(paths.output_path(village, r["survey"]))
+    review.write_status(village, rows)
     return edited
 
 
