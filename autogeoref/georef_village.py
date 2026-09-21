@@ -5,7 +5,7 @@ import sys
 import datetime
 import logging
 
-from . import config as configmod, engine, evalrows, gcp, paths, raster, references as refmod, report, review
+from . import config as configmod, engine, evalrows, gcp, paths, raster, references as refmod, report, review, transcribe
 
 log = logging.getLogger(__name__)
 
@@ -27,8 +27,13 @@ def parse(argv=None):
     ap.add_argument("--tracker", action="store_true",
                     help="also add the Auto colour/note/run columns to the tracker workbook")
     ap.add_argument("--config", help="JSON config (default configs/default.json or $AUTOGEOREF_CONFIG)")
-    ap.add_argument("--rows", action="store_true",
-                    help="append one feature row per placed parcel to _logs/eval/rows.csv")
+    ap.add_argument("--rows", dest="rows", action="store_true", default=True,
+                    help="append one feature row per placed parcel to _logs/eval/rows.csv (default)")
+    ap.add_argument("--no-rows", dest="rows", action="store_false", help="skip the evaluation rows")
+    ap.add_argument("--render-sheets", dest="render_sheets", action="store_true",
+                    help="render every sheet's drawing area to the sheet-render cache for the readers, and stop")
+    ap.add_argument("--transcribe", action="store_true",
+                    help="merge the two readers' readings into the neighbour table, review CSV, agreement report and seed plan, and stop")
     ap.add_argument("--report", action="store_true",
                     help="write the evaluation report from every row logged so far and stop")
     ap.add_argument("--purge-cache", dest="purge_cache", action="store_true",
@@ -55,6 +60,22 @@ def main(argv=None):
     cfg = configmod.load(args.config)
     if args.purge_cache:
         print("imagery cache removed:", raster.purge_cache(cfg))
+        return 0
+    if args.render_sheets:
+        done = transcribe.render_village(args.village, cfg)
+        print("rendered %d sheet crops under %s" % (len(done), transcribe.render_dir(cfg) / args.village))
+        return 0
+    if args.transcribe:
+        out = transcribe.run(args.village, cfg)
+        t = out["totals"]
+        print("%s: %d sheets, number agreement (Jaccard) %s, side agreement %s, %d disagreements -> %s"
+              % (args.village, out["sheets"], t["number_jaccard"], t["side_agreement"], out["disagreements"], out["review"]))
+        print("  table:", out["override"]); print("  report:", out["report"]); print("  seeds:", out["seeds"])
+        fs = out["plan"]["from_scratch"]
+        print("  seeds from scratch: %d (%d already placed, to place: %s); labelled parcels: %d"
+              % (fs["n"], len(fs["already_placed"]), ", ".join(fs["to_place"]) or "-", len(fs["labelled_parcels"])))
+        if out["missing"]:
+            print("  sheets missing from a reading:", ", ".join(out["missing"]))
         return 0
     if args.report:
         rows = evalrows.load_rows()

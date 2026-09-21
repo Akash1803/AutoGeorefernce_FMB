@@ -11,3 +11,5 @@ opencv-python==5.0.0
 scikit-learn==1.9.0
 openpyxl==3.1.5
 pytest==9.1.1
+pymupdf==1.28.2
+pillow==12.3.0

@@ -11,7 +11,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Optional, Tuple, Type
 
 from . import paths
 
@@ -61,15 +61,33 @@ class MLConfig:
 
 
 @dataclass
+class TranscriptionConfig:
+    """The two-reader neighbour transcription (PR 1).
+
+    ``readers``: exactly two backend names; ``json:<name>`` loads a finished reading from
+    ``<vector_dir>/neighbour_transcription/readings/<name>.json``. ``render_dir`` empty means
+    ``<project>/_cache/sheet_renders`` (gitignored, deletable). ``sample_size`` sheets on which the
+    readers fully agreed are drawn with ``sample_seed`` for the analyst's check.
+    """
+    readers: Tuple[str, ...] = ("json:A", "json:B")
+    render_dir: str = ""
+    render_scale: float = 1.6
+    sample_size: int = 10
+    sample_seed: int = 0
+
+
+@dataclass
 class Config:
     acceptance_m: float = 3.0
     imagery: ImageryConfig = field(default_factory=ImageryConfig)
     stretch: StretchConfig = field(default_factory=StretchConfig)
     ml: MLConfig = field(default_factory=MLConfig)
+    transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     source_path: str = ""
 
 
-NESTED: Dict[str, Type] = {"imagery": ImageryConfig, "stretch": StretchConfig, "ml": MLConfig}
+NESTED: Dict[str, Type] = {"imagery": ImageryConfig, "stretch": StretchConfig, "ml": MLConfig,
+                           "transcription": TranscriptionConfig}
 
 
 def _build(cls: Type, data: Dict[str, Any], where: str) -> Any:
@@ -96,6 +114,13 @@ def validate(cfg: Config) -> Config:
         raise ValueError("imagery.source must be 'google_xyz' or 'geotiff:<path>'")
     if cfg.acceptance_m <= 0:
         raise ValueError("acceptance_m must be positive")
+    readers = tuple(cfg.transcription.readers)
+    if len(readers) != 2:
+        raise ValueError("transcription.readers must name exactly two readers, got %d" % len(readers))
+    for r in readers:
+        if not str(r).startswith("json:") or len(str(r)) <= 5:
+            raise ValueError("transcription.readers entries must be 'json:<name>' in PR 1, got %r" % (r,))
+    cfg.transcription.readers = readers
     return cfg
 
 
