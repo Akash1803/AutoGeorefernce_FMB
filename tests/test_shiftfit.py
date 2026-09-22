@@ -361,3 +361,41 @@ def test_the_per_parcel_rail_correction_is_repeated_until_it_settles():
     assert shift_puvi.PARCEL_RAIL_ROUNDS >= 3
     src = inspect.getsource(shift_puvi.run_village)
     assert "for _round in range(PARCEL_RAIL_ROUNDS)" in src
+
+
+def test_a_village_already_close_to_the_norm_is_left_as_puvi_drew_it():
+    import inspect
+    from autogeoref import shift_puvi
+    # the norm is +3.0 m but the truth in the three anchored villages is +1.7, +3.0 and +6.1 m,
+    # so anything inside a few metres is as good as we can say and must not be moved
+    assert shift_puvi.RAIL_TOL_M >= 4.0
+    src = inspect.getsource(shift_puvi.run_village)
+    assert "abs(off) <= RAIL_TOL_M" in src, "the village stage must have a do-nothing case"
+
+
+def test_the_seams_are_always_checked_against_the_track_afterwards():
+    import inspect
+    from autogeoref import shift_puvi
+    src = inspect.getsource(shift_puvi.run_village)
+    # the check must not depend on the first rail stage having acted: a village Puvi already had
+    # right is exactly the one the seams can spoil
+    assert "if rail_target is not None and len(hand_points) == 0:" in src
+
+
+def test_the_track_is_checked_after_the_village_seams_are_clipped():
+    import inspect
+    from autogeoref import shift_puvi
+    src = inspect.getsource(shift_puvi.main)
+    clip = src.index("clip_village_overlaps")
+    check = src.index("after the village seams were clipped")
+    assert clip < check, "clipping moves the strips, so the last word belongs to the track"
+
+
+def test_contested_land_is_settled_again_after_the_last_track_correction():
+    import inspect
+    from autogeoref import shift_puvi
+    src = inspect.getsource(shift_puvi.main)
+    first = src.index("clip_village_overlaps")
+    track = src.index("after the village seams were clipped")
+    second = src.index("village seam, second pass")
+    assert first < track < second, "clip, settle the track, then clip what that re-opened"

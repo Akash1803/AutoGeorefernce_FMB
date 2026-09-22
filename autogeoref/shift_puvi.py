@@ -127,7 +127,15 @@ SEAM_REACH_M = 120.0   # how far across a village boundary to look for the neigh
 SEAM_STEP_M = 15.0     # sampling step along the shared frontage
 
 
+RAIL_TOL_M = 5.0          # leave a village alone if its railway land is already this close to the norm
 RAIL_MAX_WIDTH_M = 45.0   # wider than this and the survey is not the railway strip, only crossed by it
+
+# Why a tolerance at all: the norm is +3.0 m, but the three villages where Akash's placements give
+# the truth sit at +1.7, +3.0 and +6.1 m. The norm is therefore only good to about +-2.5 m, and
+# forcing every village onto exactly +3.0 m claims a precision the evidence does not have. Where
+# Puvi already has the railway land within RAIL_TOL_M of the norm, Puvi is as good as anything we
+# can say, and it is left alone (he spotted this on 2026-09-22: "Puvi vector is good compare to our
+# results?").
 RAIL_MIN_SAMPLES = 8
 
 
@@ -322,7 +330,8 @@ def rail_control_from_sheets(gdf, village, line):
 
 
 PARCEL_RAIL_ROUNDS = 6      # correcting one strip nudges the next, so repeat until settled
-PARCEL_RAIL_TOL_M = 3.0     # a strip this far from the norm is corrected on its own
+PARCEL_RAIL_TOL_M = 5.0     # a strip this far from the norm is corrected on its own; inside
+                            # that the strips of a settled village scatter by about +-2.5 m anyway
 PARCEL_RAIL_MAX_M = 18.0    # beyond this it is not a placement error but a different parcel
 PARCEL_RAIL_WIDTH = (15.0, 36.0)
 
@@ -635,6 +644,10 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
         except Exception as exc:
             rp, rd, off = np.zeros((0, 2)), np.zeros((0, 2)), None
             log.warning("%s: rail alignment skipped (%s)", village, exc)
+        if len(rp) and abs(off) <= RAIL_TOL_M:
+            log.info("%s: railway land is %+.1f m across the track, within %.0f m of the norm; left alone",
+                     village, off + rail_target, RAIL_TOL_M)
+            rp = np.zeros((0, 2))
         if len(rp):
             rail_table = _warp_table(_nodes(list(targets.geometry)), rp, rd,
                                      k=shiftfit.SEAM_K, smooth=shiftfit.SEAM_SMOOTH_M)
@@ -716,11 +729,14 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
     # Stage three: the seams pull on the railway land too, so check it once more and correct what
     # is left. Without this a village can end further off the track than it started (Peramanur went
     # +14.7 to +15.7 m, Vinchiyambakkam +2.8 to +10.7 m on the 2026-09-22 run).
-    if rail_note and rail_target is not None:
+    # run whatever the first stage decided: a village left alone because Puvi already had its
+    # railway land right still needs checking once the seams have pulled on it. Skipping this when
+    # the first stage did nothing left Peramanur at +14.7 m across the track when Puvi had it at +0.2.
+    if rail_target is not None and len(hand_points) == 0:
         try:
             line2 = _rail_line()
             rp2, rd2, off2 = rail_control(out, village, line2, rail_target)
-            if len(rp2) and abs(off2) > 0.5:
+            if len(rp2) and abs(off2) > RAIL_TOL_M:
                 t2 = _warp_table(_nodes(list(out.geometry)), rp2, rd2,
                                  k=shiftfit.SEAM_K, smooth=shiftfit.SEAM_SMOOTH_M)
                 out = out.copy()
@@ -886,6 +902,34 @@ def main(argv=None):
         layers, notes = clip_village_overlaps(layers, has_control)
         for n in notes:
             log.info("village seam: %s", n)
+        # settling land two villages both claim moves their railway strips too, and nothing had
+        # checked that afterwards: it left Perunkalathur and Peerkkararanai further off the track
+        # than Puvi had them. So the track is checked once more, last of all.
+        if rail_target is not None:
+            try:
+                line3 = _rail_line()
+            except Exception:
+                line3 = None
+            for v, gdf in layers.items():
+                if line3 is None or has_control.get(v):
+                    continue
+                for _round in range(PARCEL_RAIL_ROUNDS):
+                    rp3, rd3, off3 = rail_control(gdf, v, line3, rail_target)
+                    if not len(rp3) or abs(off3) <= RAIL_TOL_M:
+                        break
+                    t4 = _warp_table(_nodes(list(gdf.geometry)), rp3, rd3,
+                                     k=shiftfit.SEAM_K, smooth=shiftfit.SEAM_SMOOTH_M)
+                    gdf = gdf.copy()
+                    gdf["geometry"] = [_warp_with(_valid(g), t4) for g in gdf.geometry]
+                    layers[v] = gdf
+                    log.info("%s: railway land settled %+.1f m after the village seams were clipped",
+                             v, -off3)
+
+        # settling the track re-opens a little of what was just clipped, so settle the claims again
+        layers, notes2 = clip_village_overlaps(layers, has_control)
+        for n in notes2:
+            log.info("village seam, second pass: %s", n)
+
         for v, gdf in layers.items():
             gdf.to_crs(4326).to_file(work_dir / ("%s_puvi_shifted.geojson" % v),
                                      driver="GeoJSON", COORDINATE_PRECISION=8)
