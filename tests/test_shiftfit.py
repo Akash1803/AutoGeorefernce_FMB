@@ -246,3 +246,21 @@ def test_a_crowd_of_seam_points_is_averaged_more_widely_than_hand_control():
     wide, _ = shiftfit.fit(seam, disp, q, k=shiftfit.SEAM_K, smooth=shiftfit.SEAM_SMOOTH_M)
     assert abs(wide[0][1] - wide[1][1]) < abs(sharp[0][1] - sharp[1][1]), "the wide field varies less"
     assert abs(wide[0][1] - wide[1][1]) < 1.0, "two points 10 m apart move together"
+
+
+def test_one_control_parcel_that_disagrees_with_its_neighbours_stops_dragging_the_answer():
+    # eight neighbours agree the ground moves 10 m north; one says 60 m south
+    points = np.array([[float(i) * 40.0, 0.0] for i in range(9)])
+    disp = np.repeat(np.array([[0.0, 10.0]]), 9, axis=0)
+    disp[4] = [0.0, -60.0]
+    q = np.array([160.0, 5.0])
+    plain = shiftfit.idw(points, disp, q, rounds=0)
+    robust = shiftfit.idw(points, disp, q)
+    assert abs(robust[1] - 10.0) < abs(plain[1] - 10.0), "the odd one out counts for less"
+    assert robust[1] > 0, "and no longer flips the direction"
+
+
+def test_the_robust_step_leaves_agreeing_control_alone():
+    points = np.array([[0.0, 0.0], [100.0, 0.0], [0.0, 100.0], [100.0, 100.0], [50.0, 50.0]])
+    disp = np.repeat(np.array([[3.0, -7.0]]), 5, axis=0)
+    assert np.allclose(shiftfit.idw(points, disp, np.array([50.0, 20.0])), [3.0, -7.0], atol=1e-6)
