@@ -313,3 +313,51 @@ def test_railway_land_is_checked_again_after_the_seams():
     seam = src.index("seam_control(body, neighbour")
     last = src.index("settled %+.1f m after the seams")
     assert first < seam < last, "rail, then seams, then rail again"
+
+
+def test_rigid_fit_finds_the_turn_and_shift_between_two_drawings_of_one_parcel():
+    from shapely import affinity
+    from shapely.geometry import Polygon
+    from autogeoref import shift_puvi
+    sheet = Polygon([(0, 0), (60, 0), (60, 20), (0, 20)])
+    placed = affinity.translate(affinity.rotate(sheet, 30.0, origin="centroid"), 500.0, -300.0)
+    ang, shift, iou = shift_puvi.rigid_fit(sheet, placed)
+    assert iou > 0.95
+    assert min(abs(ang - 30.0), abs(ang - 210.0)) < 1.0, "a rectangle is the same turned 180 degrees"
+
+
+def test_the_drawn_track_was_measured_and_is_not_used_to_correct():
+    # Measured 2026-09-22 on the parcels the team has placed: the strip-centre rule is nearer the
+    # truth for 15 of 21 rail parcels, the sheet's drawn track for 6, and using the drawn track took
+    # Kizhikaranai from 12.74 m to 20.57 m RMSE. Kept for the record, not wired into the correction.
+    import inspect
+    from autogeoref import shift_puvi
+    src = inspect.getsource(shift_puvi.run_village)
+    assert "rail_control_from_sheets" not in src
+
+
+def test_a_single_strip_far_off_the_track_is_corrected_but_an_odd_shaped_one_is_not():
+    import geopandas as gpd
+    from shapely.geometry import LineString, Polygon
+    from autogeoref import shift_puvi
+
+    line = LineString([(0, 0), (0, 1000)])
+    good = Polygon([(-22, 100), (2, 100), (2, 400), (-22, 400)])     # 24 m wide, 9 m off the norm
+    huge = Polygon([(-60, 500), (2, 500), (2, 800), (-60, 800)])     # 62 m wide: not a rail strip
+    gdf = gpd.GeoDataFrame({"survey_no": ["a", "b"]}, geometry=[good, huge], crs=32644)
+    # measure directly, since which surveys are railway land comes from the project files
+    off_good = shift_puvi.across_track(good, line)
+    width = float(np.percentile(off_good, 95)) - float(np.percentile(off_good, 5))
+    assert shift_puvi.PARCEL_RAIL_WIDTH[0] <= width <= shift_puvi.PARCEL_RAIL_WIDTH[1]
+    off_huge = shift_puvi.across_track(huge, line)
+    wide = float(np.percentile(off_huge, 95)) - float(np.percentile(off_huge, 5))
+    assert wide > shift_puvi.PARCEL_RAIL_WIDTH[1], "too wide to be a railway strip"
+    assert shift_puvi.PARCEL_RAIL_TOL_M < shift_puvi.PARCEL_RAIL_MAX_M
+
+
+def test_the_per_parcel_rail_correction_is_repeated_until_it_settles():
+    import inspect
+    from autogeoref import shift_puvi
+    assert shift_puvi.PARCEL_RAIL_ROUNDS >= 3
+    src = inspect.getsource(shift_puvi.run_village)
+    assert "for _round in range(PARCEL_RAIL_ROUNDS)" in src

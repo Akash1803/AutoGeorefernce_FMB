@@ -161,6 +161,75 @@ def across_track(geom, line, step=8.0):
     return np.array(out)
 
 
+def sheet_track(village, survey, min_span=0.5):
+    """The railway line the FMB sheet itself draws inside a rail parcel, in sheet metres.
+
+    A rail sheet draws the track as a ticked line running the length of the strip, between the two
+    long boundary edges. Taking it from the sheet is better than assuming the strip is centred on
+    the track: the sheet says where the track sits inside this particular parcel.
+
+    Returns (LineString, parcel outline) in sheet coordinates, or (None, None).
+    """
+    from shapely.geometry import LineString
+    pdir = paths.vector_dir(village)
+    pf, lf = pdir / ("%s_parcels.geojson" % survey), pdir / ("%s_lines.geojson" % survey)
+    if not pf.exists() or not lf.exists():
+        return None, None
+    try:
+        poly = unary_union([_valid(g) for g in gpd.read_file(pf).geometry if g is not None])
+        lines = gpd.read_file(lf)
+    except Exception:
+        return None, None
+    if poly is None or poly.is_empty:
+        return None, None
+    pts = np.array(poly.exterior.coords)[:, :2] if poly.geom_type == "Polygon" else np.array(
+        max(poly.geoms, key=lambda g: g.area).exterior.coords)[:, :2]
+    centre = pts.mean(axis=0)
+    u, sv, vt = np.linalg.svd(pts - centre)
+    axis = vt[0]                       # along the strip
+    normal = np.array([-axis[1], axis[0]])
+    span = float(np.ptp((pts - centre) @ axis))
+    best, best_score = None, None
+    for g in lines.geometry:
+        if g is None or g.is_empty:
+            continue
+        for part in (g.geoms if g.geom_type.startswith("Multi") else [g]):
+            if part.geom_type != "LineString" or part.length < min_span * span:
+                continue
+            c = np.array(part.coords)[:, :2]
+            off = (c - centre) @ normal
+            # the track runs the length of the strip and stays near its middle, unlike the two
+            # long boundary edges which sit at the extremes
+            score = float(np.mean(np.abs(off)))
+            if best_score is None or score < best_score:
+                best, best_score = part, score
+    if best is None:
+        return None, None
+    return LineString(np.array(best.coords)[:, :2]), poly
+
+
+def rigid_fit(src, dst, coarse=2.0, fine=0.25):
+    """Rotation and shift (no scale) putting `src` over `dst`, by best overlap."""
+    from shapely import affinity
+    sc = np.array(src.centroid.coords[0])
+    dc = np.array(dst.centroid.coords[0])
+    base = affinity.translate(src, dc[0] - sc[0], dc[1] - sc[1])
+    best, best_ang = None, 0.0
+    for ang in np.arange(0.0, 360.0, coarse):
+        g = affinity.rotate(base, ang, origin="centroid")
+        inter = g.intersection(dst).area
+        score = inter / (g.area + dst.area - inter)
+        if best is None or score > best:
+            best, best_ang = score, ang
+    for ang in np.arange(best_ang - coarse, best_ang + coarse + 1e-9, fine):
+        g = affinity.rotate(base, ang, origin="centroid")
+        inter = g.intersection(dst).area
+        score = inter / (g.area + dst.area - inter)
+        if score > best:
+            best, best_ang = score, ang
+    return best_ang, dc - sc, float(best)
+
+
 def rail_strips(gdf, village, line):
     """The parcels that ARE the railway land here, with where each sits across the track.
 
@@ -185,6 +254,111 @@ def rail_strips(gdf, village, line):
         out.append({"index": i, "survey": str(row["survey_no"]), "centre": (lo + hi) / 2.0,
                     "width": hi - lo, "at": np.array(g.centroid.coords[0])})
     return out
+
+
+def track_offsets(gdf, village, line, min_iou=0.45, samples=21):
+    """For each rail parcel, how far the track its own sheet draws lies from the real track.
+
+    The sheet is fitted rigidly onto the placed parcel and the drawn track carried across with it.
+    This beats assuming the strip is centred on the track: in Kizhikaranai 171 the sheet puts the
+    track 9.7 m off the strip's centre, and in Vandalur 273 7.2 m off.
+    """
+    from shapely import affinity
+    from shapely.geometry import Point
+    out = []
+    for st in rail_strips(gdf, village, line):
+        t, poly = sheet_track(village, st["survey"])
+        if t is None or poly is None:
+            continue
+        placed = _valid(gdf.loc[st["index"], "geometry"])
+        if placed is None or placed.is_empty:
+            continue
+        ang, shift, iou = rigid_fit(poly, placed)
+        if iou < min_iou:
+            continue
+        tw = affinity.rotate(affinity.translate(t, shift[0], shift[1]), ang,
+                             origin=Point(*placed.centroid.coords[0]))
+        off = []
+        for k in range(samples):
+            q = tw.interpolate(k / (samples - 1.0), normalized=True)
+            sdist = line.project(q)
+            r = line.interpolate(sdist)
+            t0 = line.interpolate(max(0.0, sdist - 15.0))
+            t1 = line.interpolate(min(line.length, sdist + 15.0))
+            d = np.array([t1.x - t0.x, t1.y - t0.y])
+            n = np.linalg.norm(d)
+            if n < 1e-9:
+                continue
+            d /= n
+            off.append(float((np.array([q.x, q.y]) - np.array([r.x, r.y])) @ np.array([-d[1], d[0]])))
+        if off:
+            out.append({**st, "drawn_off": float(np.median(off)), "iou": iou})
+    return out
+
+
+def rail_control_from_sheets(gdf, village, line):
+    """Control that puts the track each sheet draws onto the track that is really there.
+
+    Across-track only, as ever: along the track a strip slides invisibly.
+    """
+    from shapely.geometry import Point
+    rows = track_offsets(gdf, village, line)
+    if not rows:
+        return np.zeros((0, 2)), np.zeros((0, 2)), None
+    med = float(np.median([r["drawn_off"] for r in rows]))
+    P, D = [], []
+    for r in rows:
+        sdist = line.project(Point(r["at"]))
+        t0 = line.interpolate(max(0.0, sdist - 15.0))
+        t1 = line.interpolate(min(line.length, sdist + 15.0))
+        d = np.array([t1.x - t0.x, t1.y - t0.y])
+        n = np.linalg.norm(d)
+        if n < 1e-9:
+            continue
+        d /= n
+        P.append(r["at"])
+        D.append(np.array([-d[1], d[0]]) * (-med))
+    return np.array(P), np.array(D), med
+
+
+PARCEL_RAIL_ROUNDS = 6      # correcting one strip nudges the next, so repeat until settled
+PARCEL_RAIL_TOL_M = 3.0     # a strip this far from the norm is corrected on its own
+PARCEL_RAIL_MAX_M = 18.0    # beyond this it is not a placement error but a different parcel
+PARCEL_RAIL_WIDTH = (15.0, 36.0)
+
+
+def rail_control_per_parcel(gdf, village, line, target_centre,
+                            tol=PARCEL_RAIL_TOL_M, cap=PARCEL_RAIL_MAX_M):
+    """Control for the individual strips still sitting off the track after the village is aligned.
+
+    A village-wide correction moves the median; a strip that disagrees with its own neighbours
+    stays off. 25 of the 102 rail parcels were 4 m or more off after the village stage. Each is
+    given its own across-track control point, so it moves and the parcels beside it follow through
+    the same field, which keeps the boundaries they share.
+
+    Strips outside `PARCEL_RAIL_WIDTH` or more than `cap` off are left alone: at that point the
+    parcel is not a mis-placed railway strip but a different piece of ground.
+    """
+    from shapely.geometry import Point
+    P, D, fixed = [], [], []
+    for st in rail_strips(gdf, village, line):
+        off = st["centre"] - target_centre
+        if abs(off) < tol or abs(off) > cap:
+            continue
+        if not (PARCEL_RAIL_WIDTH[0] <= st["width"] <= PARCEL_RAIL_WIDTH[1]):
+            continue
+        sdist = line.project(Point(st["at"]))
+        t0 = line.interpolate(max(0.0, sdist - 15.0))
+        t1 = line.interpolate(min(line.length, sdist + 15.0))
+        d = np.array([t1.x - t0.x, t1.y - t0.y])
+        n = np.linalg.norm(d)
+        if n < 1e-9:
+            continue
+        d /= n
+        P.append(st["at"])
+        D.append(np.array([-d[1], d[0]]) * (-off))
+        fixed.append((st["survey"], round(off, 1)))
+    return np.array(P) if P else np.zeros((0, 2)), np.array(D) if D else np.zeros((0, 2)), fixed
 
 
 def rail_control(gdf, village, line, target_centre):
@@ -553,6 +727,22 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
                 out["geometry"] = [_warp_with(_valid(g), t2) for g in out.geometry]
                 rail_note += "; settled %+.1f m after the seams" % -off2
                 log.info("%s: railway land settled %+.1f m after the seams", village, -off2)
+            # and finally the strips that still disagree with their own neighbours, one by one.
+            # Correcting one moves the parcels beside it, which nudges the next strip, so this is
+            # repeated until nothing is left outside the tolerance.
+            done = 0
+            for _round in range(PARCEL_RAIL_ROUNDS):
+                pp, pd, fixed = rail_control_per_parcel(out, village, line2, rail_target)
+                if not len(pp):
+                    break
+                t3 = _warp_table(_nodes(list(out.geometry)), pp, pd)
+                out = out.copy()
+                out["geometry"] = [_warp_with(_valid(g), t3) for g in out.geometry]
+                done += len(fixed)
+                log.info("%s: round %d, %d rail strip(s) corrected on their own: %s",
+                         village, _round + 1, len(fixed), fixed[:6])
+            if done:
+                rail_note += "; %d strip correction(s) over %d round(s)" % (done, _round + 1)
         except Exception as exc:
             log.warning("%s: second rail pass skipped (%s)", village, exc)
         out["fit_method"] = method
