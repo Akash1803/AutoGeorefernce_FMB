@@ -303,3 +303,13 @@ def test_railway_land_is_corrected_in_its_own_stage_before_the_seams():
     rail_at = src.index("rail_table = _warp_table")
     seam_at = src.index("seam_control(body, neighbour")
     assert rail_at < seam_at, "a few rail strips cannot outvote hundreds of seam points in one fit"
+
+
+def test_railway_land_is_checked_again_after_the_seams():
+    import inspect
+    from autogeoref import shift_puvi
+    src = inspect.getsource(shift_puvi.run_village)
+    first = src.index("rail_table = _warp_table")
+    seam = src.index("seam_control(body, neighbour")
+    last = src.index("settled %+.1f m after the seams")
+    assert first < seam < last, "rail, then seams, then rail again"

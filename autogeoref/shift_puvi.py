@@ -539,6 +539,24 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
             "fit_method", "control_parcels",
             "shift_x_m", "shift_y_m", "shift_m", "expected_error_m", "puvi_error_before_m",
             "run_at", "geometry"]
+    # Stage three: the seams pull on the railway land too, so check it once more and correct what
+    # is left. Without this a village can end further off the track than it started (Peramanur went
+    # +14.7 to +15.7 m, Vinchiyambakkam +2.8 to +10.7 m on the 2026-09-22 run).
+    if rail_note and rail_target is not None:
+        try:
+            line2 = _rail_line()
+            rp2, rd2, off2 = rail_control(out, village, line2, rail_target)
+            if len(rp2) and abs(off2) > 0.5:
+                t2 = _warp_table(_nodes(list(out.geometry)), rp2, rd2,
+                                 k=shiftfit.SEAM_K, smooth=shiftfit.SEAM_SMOOTH_M)
+                out = out.copy()
+                out["geometry"] = [_warp_with(_valid(g), t2) for g in out.geometry]
+                rail_note += "; settled %+.1f m after the seams" % -off2
+                log.info("%s: railway land settled %+.1f m after the seams", village, -off2)
+        except Exception as exc:
+            log.warning("%s: second rail pass skipped (%s)", village, exc)
+        out["fit_method"] = method
+
     out = out[[c for c in keep if c in out.columns]]
     out, fixed = clip_siblings(out)
     if fixed:
