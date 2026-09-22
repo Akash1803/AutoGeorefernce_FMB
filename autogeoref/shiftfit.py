@@ -91,11 +91,16 @@ def warp_points(points, disp, coords, min_control=IDW_MIN_CONTROL):
     return fit(points, disp, coords, min_control=min_control)
 
 
-def fit(points, disp, targets, min_control=IDW_MIN_CONTROL):
+SEAM_K = 40             # seam points crowd along a frontage, so more of them vote
+SEAM_SMOOTH_M = 150.0   # and from further off, or a parcel on the seam is pulled out of shape
+
+
+def fit(points, disp, targets, min_control=IDW_MIN_CONTROL, k=IDW_K, smooth=IDW_SMOOTH_M):
     """Displacement for each target. Returns (array of shifts, method name).
 
     With few control points a local field would invent structure it cannot know, so one mean shift
     is applied to the whole village; with enough of them each target follows its nearest control.
+    `k` and `smooth` widen the field for control that comes in crowds, such as seam points.
     """
     points = np.asarray(points, float)
     disp = np.asarray(disp, float)
@@ -104,7 +109,7 @@ def fit(points, disp, targets, min_control=IDW_MIN_CONTROL):
         return np.zeros((len(targets), 2)), "none"
     if len(points) < min_control:
         return np.repeat(mean_shift(disp)[None, :], len(targets), axis=0), "mean shift"
-    return np.array([idw(points, disp, t) for t in targets]), "local field"
+    return np.array([idw(points, disp, t, k=k, smooth=smooth) for t in targets]), "local field"
 
 
 def leave_one_out(points, disp, min_control=IDW_MIN_CONTROL):
@@ -135,7 +140,7 @@ def accuracy(points, disp, min_control=IDW_MIN_CONTROL):
     }
 
 
-REPORT_COLUMNS = ["village_code", "village_name", "control", "targets", "method", "seam_note",
+REPORT_COLUMNS = ["village_code", "village_name", "control", "targets", "buffer_parcels", "method", "seam_note",
                   "before_median_m", "before_p90_m", "after_median_m", "after_p90_m", "after_max_m",
                   "mean_shift_x_m", "mean_shift_y_m", "run_at"]
 

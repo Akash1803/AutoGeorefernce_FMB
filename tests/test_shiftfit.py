@@ -234,3 +234,15 @@ def test_a_seam_point_is_not_evidence():
     src = inspect.getsource(shift_puvi.run_village)
     assert "hand_points = cpoints.copy()" in src
     assert "np.linalg.norm(hand_points - q" in src, "the evidence flag measures distance to the team's own parcels"
+
+
+def test_a_crowd_of_seam_points_is_averaged_more_widely_than_hand_control():
+    # 40 seam points along one frontage must not yank the parcels beside them out of shape
+    seam = np.array([[float(i) * 10.0, 0.0] for i in range(40)])
+    disp = np.repeat(np.array([[0.0, 8.0]]), 40, axis=0)
+    disp[20:] = [0.0, -8.0]                       # the frontage disagrees with itself mid-way
+    q = np.array([[195.0, 30.0], [205.0, 30.0]])
+    sharp, _ = shiftfit.fit(seam, disp, q)
+    wide, _ = shiftfit.fit(seam, disp, q, k=shiftfit.SEAM_K, smooth=shiftfit.SEAM_SMOOTH_M)
+    assert abs(wide[0][1] - wide[1][1]) < abs(sharp[0][1] - sharp[1][1]), "the wide field varies less"
+    assert abs(wide[0][1] - wide[1][1]) < 1.0, "two points 10 m apart move together"

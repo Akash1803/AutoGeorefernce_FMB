@@ -61,13 +61,13 @@ def _nodes(geoms, grid=NODE_GRID_M):
     return out
 
 
-def _warp_table(nodes, points, disp, grid=NODE_GRID_M):
+def _warp_table(nodes, points, disp, grid=NODE_GRID_M, **fit_kw):
     """Where each distinct node lands. One field evaluation per node, not per polygon."""
     keys = list(nodes)
     coords = np.array([nodes[k] for k in keys], float)
     if not len(coords):
         return {}
-    shifts, _ = shiftfit.fit(points, disp, coords)
+    shifts, _ = shiftfit.fit(points, disp, coords, **fit_kw)
     return {k: tuple(c + s) for k, c, s in zip(keys, coords, shifts)}
 
 
@@ -376,7 +376,8 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
             log.info("%s: no control of our own, %s", village, seam_note)
 
     tpoints = np.array([g.centroid.coords[0] for g in targets.geometry])
-    shifts, method = shiftfit.fit(cpoints, cdisp, tpoints)
+    fit_kw = ({"k": shiftfit.SEAM_K, "smooth": shiftfit.SEAM_SMOOTH_M} if seam_note else {})
+    shifts, method = shiftfit.fit(cpoints, cdisp, tpoints, **fit_kw)
     if seam_note:
         method = "seam to corrected neighbour"
 
@@ -384,10 +385,10 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
     # hand: mixing two sources of geometry in one layer is what draws a double line along every
     # boundary between them. Their own files stay the authority and are untouched.
     control_keys = {k for k, _ in pairs}
-    table = _warp_table(_nodes(targets.geometry), cpoints, cdisp) if len(cpoints) else {}
+    table = _warp_table(_nodes(targets.geometry), cpoints, cdisp, **fit_kw) if len(cpoints) else {}
     moved, source = [], []
     for (i, row), s in zip(targets.iterrows(), shifts):
-        field = (lambda q: shiftfit.fit(cpoints, cdisp, q[None, :])[0][0]) if len(cpoints) else None
+        field = (lambda q: shiftfit.fit(cpoints, cdisp, q[None, :], **fit_kw)[0][0]) if len(cpoints) else None
         moved.append(_warp_with(row.geometry, table, field=field) if table else row.geometry)
         source.append("hand placed by the team" if row["key"] in control_keys else "puvi")
     out = targets.copy()
@@ -450,7 +451,8 @@ def main(argv=None):
     ap.add_argument("--corridor", action="store_true",
                     help="every village the rail buffer passes through that has a Puvi vector")
     ap.add_argument("--buffer-layer", action="store_true",
-                    help="also write just the parcels that touch the rail buffer, cut from the result")
+                    help="deliver only the parcels touching the rail buffer; whole villages are still "
+                         "processed, into a _working folder, because the seams need them")
     ap.add_argument("--no-clip", action="store_true",
                     help="leave land that two villages both claim as it is")
     ap.add_argument("--out", default="", help="output folder (default: <project>\\Puvi_Shifted\\<date>)")
@@ -471,6 +473,12 @@ def main(argv=None):
     if order != villages:
         log.info("villages with our own placements go first: %s", order)
 
+    # whole villages are processed even when only the buffer parcels are wanted: the seams and the
+    # topology between villages only come out right on the complete fabric. Those intermediate
+    # files go to _working and the deliverable is written beside it.
+    work_dir = (out_dir / "_working") if args.buffer_layer else out_dir
+    work_dir.mkdir(parents=True, exist_ok=True)
+
     rows, placed = [], {}
     for v in order:
         seams = []
@@ -479,11 +487,11 @@ def main(argv=None):
             for other, geom in placed.items():
                 if body.distance(geom) <= SEAM_REACH_M:
                     seams.append((geom, 1.0 if has_control[other] else 0.5))
-        row = run_village(v, out_dir, buffer_only=args.buffer_only,
+        row = run_village(v, work_dir, buffer_only=args.buffer_only,
                           extra_control=args.control, stamp=stamp, seams=seams)
         if row:
             rows.append(row)
-            written = gpd.read_file(out_dir / ("%s_puvi_shifted.geojson" % v)).to_crs(UTM)
+            written = gpd.read_file(work_dir / ("%s_puvi_shifted.geojson" % v)).to_crs(UTM)
             placed[v] = unary_union([x for x in (_valid(g) for g in written.geometry) if x is not None])
     if not rows:
         log.error("nothing written")
@@ -498,28 +506,30 @@ def main(argv=None):
                      if other != v and body.distance(geom) <= SEAM_REACH_M]
             if not seams:
                 continue
-            row = run_village(v, out_dir, buffer_only=args.buffer_only,
+            row = run_village(v, work_dir, buffer_only=args.buffer_only,
                               extra_control=args.control, stamp=stamp, seams=seams)
             if row:
                 rows = [r for r in rows if r["village_code"] != v] + [row]
-                written = gpd.read_file(out_dir / ("%s_puvi_shifted.geojson" % v)).to_crs(UTM)
+                written = gpd.read_file(work_dir / ("%s_puvi_shifted.geojson" % v)).to_crs(UTM)
                 placed[v] = unary_union([x for x in (_valid(g) for g in written.geometry) if x is not None])
 
     # land two villages both claim, which no amount of moving can settle
-    layers = {r["village_code"]: gpd.read_file(out_dir / ("%s_puvi_shifted.geojson" % r["village_code"])).to_crs(UTM)
+    layers = {r["village_code"]: gpd.read_file(work_dir / ("%s_puvi_shifted.geojson" % r["village_code"])).to_crs(UTM)
               for r in rows}
     if not args.no_clip:
         layers, notes = clip_village_overlaps(layers, has_control)
         for n in notes:
             log.info("village seam: %s", n)
         for v, gdf in layers.items():
-            gdf.to_crs(4326).to_file(out_dir / ("%s_puvi_shifted.geojson" % v),
+            gdf.to_crs(4326).to_file(work_dir / ("%s_puvi_shifted.geojson" % v),
                                      driver="GeoJSON", COORDINATE_PRECISION=8)
 
+    rows = sorted(rows, key=lambda r: order.index(r["village_code"]))
     if args.buffer_layer:
         parts = []
-        for v in order:
-            f = out_dir / ("%s_puvi_shifted.geojson" % v)
+        for r in rows:
+            v = r["village_code"]
+            f = work_dir / ("%s_puvi_shifted.geojson" % v)
             if not f.exists():
                 continue
             g = gpd.read_file(f)
@@ -528,20 +538,23 @@ def main(argv=None):
             except Exception:
                 keys = set()
             sub = g[g["survey_no"].astype(str).isin(keys)]
-            if len(sub):
-                parts.append(sub)
+            if not len(sub):
+                continue
+            sub.to_file(out_dir / ("%s_buffer_parcels.geojson" % v), driver="GeoJSON",
+                        COORDINATE_PRECISION=8)
+            parts.append(sub)
+            r["buffer_parcels"] = len(sub)
         if parts:
             buf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=4326)
-            buf.to_file(out_dir / "puvi_shifted_rail_buffer.geojson", driver="GeoJSON",
+            buf.to_file(out_dir / "rail_buffer_parcels.geojson", driver="GeoJSON",
                         COORDINATE_PRECISION=8)
-            log.info("parcels in the rail buffer: %d -> %s", len(buf),
-                     out_dir / "puvi_shifted_rail_buffer.geojson")
-
-    rows = sorted(rows, key=lambda r: order.index(r["village_code"]))
-    merged = pd.concat([gpd.read_file(out_dir / ("%s_puvi_shifted.geojson" % r["village_code"]))
-                        for r in rows], ignore_index=True)
-    gpd.GeoDataFrame(merged, crs=4326).to_file(out_dir / "puvi_shifted_all.geojson",
-                                               driver="GeoJSON", COORDINATE_PRECISION=8)
+            log.info("deliverable: %d cadastral parcels in the rail buffer over %d villages -> %s",
+                     len(buf), buf["village_code"].nunique(), out_dir / "rail_buffer_parcels.geojson")
+    else:
+        merged = pd.concat([gpd.read_file(out_dir / ("%s_puvi_shifted.geojson" % r["village_code"]))
+                            for r in rows], ignore_index=True)
+        gpd.GeoDataFrame(merged, crs=4326).to_file(out_dir / "puvi_shifted_all.geojson",
+                                                   driver="GeoJSON", COORDINATE_PRECISION=8)
     shiftfit.write_report(rows, out_dir / "shift_report.csv")
     print("\n%-16s %8s %8s %-12s %10s %10s" % ("village", "control", "parcels", "method", "before", "after"))
     for r in rows:
