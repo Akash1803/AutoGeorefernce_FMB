@@ -217,3 +217,20 @@ def test_a_parcel_is_never_lost_even_if_the_warp_fails():
     poly = Polygon([(10, 10), (60, 10), (60, 60), (10, 60)])
     out = shift_puvi._warp_with(poly, {}, field=lambda q: np.array([5.0, 0.0]))
     assert out is not None and not out.is_empty
+
+
+def test_the_corridor_list_is_every_buffer_village_that_has_puvi_data():
+    from autogeoref import shift_puvi
+    # 23 revenue villages are crossed by the 30 m buffer; Tambaram 35_05_010 has no Puvi vector
+    assert len(shift_puvi.CORRIDOR) == 22
+    assert "35_05_010" not in shift_puvi.CORRIDOR
+    assert set(shift_puvi.STRETCH) <= set(shift_puvi.CORRIDOR)
+    assert len(set(shift_puvi.CORRIDOR)) == len(shift_puvi.CORRIDOR), "no village listed twice"
+
+
+def test_a_seam_point_is_not_evidence():
+    import inspect
+    from autogeoref import shift_puvi
+    src = inspect.getsource(shift_puvi.run_village)
+    assert "hand_points = cpoints.copy()" in src
+    assert "np.linalg.norm(hand_points - q" in src, "the evidence flag measures distance to the team's own parcels"

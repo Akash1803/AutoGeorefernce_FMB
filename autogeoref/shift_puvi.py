@@ -30,6 +30,13 @@ log = logging.getLogger(__name__)
 
 MAX_CONTROL_M = 200.0   # a control parcel further than this from its Puvi twin is a key clash
 STRETCH = ["35_04_052", "35_04_054", "35_04_056", "35_04_076", "35_04_077", "35_04_074"]
+
+# every revenue village the 30 m rail buffer passes through that has a Puvi vector, ordered along
+# the line from the Tambaram end. Tambaram itself (35_05_010) has no Puvi vector in the archive.
+CORRIDOR = ["03_14_194", "35_05_136", "35_05_134", "35_15_002", "35_15_003", "35_15_004",
+            "35_15_006", "35_15_005", "35_04_052", "35_04_054", "35_04_056", "35_04_076",
+            "35_04_077", "35_04_074", "35_04_073", "35_04_085", "35_04_086", "35_04_071",
+            "35_04_221", "35_04_224", "35_04_225", "35_04_226"]
 UTM = 32644
 
 
@@ -351,6 +358,7 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
     cdisp = np.array(cdisp) if cdisp else np.zeros((0, 2))
 
     acc = shiftfit.accuracy(cpoints, cdisp)
+    hand_points = cpoints.copy()          # before any seam point joins the control
     seam_note = ""
     if len(cpoints) == 0 and seams:
         # no placement of ours anywhere in this village: the only thing known about it is that its
@@ -389,8 +397,10 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
     out["shift_x_m"] = [round(float(s[0]), 2) for s in shifts]
     out["shift_y_m"] = [round(float(s[1]), 2) for s in shifts]
     out["shift_m"] = [round(float(np.hypot(*s)), 2) for s in shifts]
-    if len(cpoints):
-        near = np.array([float(np.min(np.linalg.norm(cpoints - q, axis=1))) for q in tpoints])
+    # evidence means nearness to a parcel the team placed, never to a seam point: a seam says two
+    # villages touch, which is a statement about the fabric and not about where either one truly is
+    if len(hand_points):
+        near = np.array([float(np.min(np.linalg.norm(hand_points - q, axis=1))) for q in tpoints])
     else:
         near = np.full(len(tpoints), np.inf)
     out["source"] = source
@@ -437,14 +447,18 @@ def main(argv=None):
                     help="extra control file with a survey_no column (repeatable)")
     ap.add_argument("--no-seams", action="store_true",
                     help="do not pull a village with no control onto its corrected neighbours")
+    ap.add_argument("--corridor", action="store_true",
+                    help="every village the rail buffer passes through that has a Puvi vector")
+    ap.add_argument("--buffer-layer", action="store_true",
+                    help="also write just the parcels that touch the rail buffer, cut from the result")
     ap.add_argument("--no-clip", action="store_true",
                     help="leave land that two villages both claim as it is")
     ap.add_argument("--out", default="", help="output folder (default: <project>\\Puvi_Shifted\\<date>)")
     args = ap.parse_args(argv)
 
-    villages = list(args.villages) + (STRETCH if args.stretch else [])
+    villages = list(args.villages) + (STRETCH if args.stretch else []) + (CORRIDOR if args.corridor else [])
     if not villages:
-        ap.error("name at least one village, or pass --stretch")
+        ap.error("name at least one village, or pass --stretch or --corridor")
     stamp = shiftfit.run_stamp()
     out_dir = __import__("pathlib").Path(args.out) if args.out else shiftfit.output_dir()
     villages = list(dict.fromkeys(villages))
@@ -501,6 +515,27 @@ def main(argv=None):
         for v, gdf in layers.items():
             gdf.to_crs(4326).to_file(out_dir / ("%s_puvi_shifted.geojson" % v),
                                      driver="GeoJSON", COORDINATE_PRECISION=8)
+
+    if args.buffer_layer:
+        parts = []
+        for v in order:
+            f = out_dir / ("%s_puvi_shifted.geojson" % v)
+            if not f.exists():
+                continue
+            g = gpd.read_file(f)
+            try:
+                keys = in_buffer_keys(v)
+            except Exception:
+                keys = set()
+            sub = g[g["survey_no"].astype(str).isin(keys)]
+            if len(sub):
+                parts.append(sub)
+        if parts:
+            buf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=4326)
+            buf.to_file(out_dir / "puvi_shifted_rail_buffer.geojson", driver="GeoJSON",
+                        COORDINATE_PRECISION=8)
+            log.info("parcels in the rail buffer: %d -> %s", len(buf),
+                     out_dir / "puvi_shifted_rail_buffer.geojson")
 
     rows = sorted(rows, key=lambda r: order.index(r["village_code"]))
     merged = pd.concat([gpd.read_file(out_dir / ("%s_puvi_shifted.geojson" % r["village_code"]))
