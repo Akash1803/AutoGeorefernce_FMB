@@ -71,3 +71,20 @@ def test_the_thresholds_are_the_ones_the_sop_states():
     assert fmb_on_base.MATCH_MIN == 0.60
     assert fmb_on_base.AREA_BAND == (0.80, 1.25)
     assert fmb_on_base.GCP_REACH_M == 5.0
+
+
+def test_conservation_counts_what_the_placement_kept_and_lost():
+    base = Polygon([(0, 0), (100, 0), (100, 50), (0, 50)])
+    kept = [Polygon([(0, 0), (60, 0), (60, 50), (0, 50)]),
+            Polygon([(55, 0), (100, 0), (100, 50), (55, 50)])]     # they overlap by 5 x 50
+    c = fmb_on_base.conservation(kept + [None], 3, base, base.buffer(0))
+    assert c["plots_expected"] == 3 and c["plots_kept"] == 2, "a dropped plot is counted"
+    assert abs(c["self_overlap_sqm"] - 250.0) < 1.0
+    assert c["gap_to_base_sqm"] < 1.0, "together they cover the base"
+
+
+def test_conservation_reports_ground_the_placement_leaves_uncovered():
+    base = Polygon([(0, 0), (100, 0), (100, 50), (0, 50)])
+    half = [Polygon([(0, 0), (50, 0), (50, 50), (0, 50)])]
+    c = fmb_on_base.conservation(half, 1, base, half[0].buffer(0))
+    assert abs(c["gap_to_base_sqm"] - 2500.0) < 1.0

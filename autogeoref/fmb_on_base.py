@@ -128,8 +128,30 @@ def apply_pose(geom, pose, base_geom):
 
 
 REPORT_COLUMNS = ["village_code", "village", "survey_no", "geometry_source", "shape_match",
-                  "area_ratio", "gcp_points", "gcp_residual_m", "plots", "ambiguous_turn",
-                  "evidence", "flag", "run_at"]
+                  "area_ratio", "boundary_gap_m", "plots_expected", "plots_kept",
+                  "self_overlap_sqm", "gap_to_base_sqm", "gcp_points", "gcp_residual_m",
+                  "ambiguous_turn", "evidence", "flag", "run_at"]
+
+
+def conservation(placed_plots, sheet_count, base_geom, placed_outline):
+    """What the placement kept and what it lost, in counts and square metres.
+
+    Taken from the tool Akash shared: a placement that quietly drops plots, overlaps itself or
+    leaves the base's ground uncovered should say so, not read as clean.
+    """
+    kept = [g for g in placed_plots if g is not None and not g.is_empty]
+    overlap = 0.0
+    for i in range(len(kept)):
+        for j in range(i + 1, len(kept)):
+            inter = kept[i].intersection(kept[j])
+            if not inter.is_empty:
+                overlap += inter.area
+    body = unary_union(kept) if kept else None
+    gap = float(base_geom.difference(body).area) if body is not None else float(base_geom.area)
+    snap = float(placed_outline.hausdorff_distance(base_geom.boundary)) if placed_outline is not None else float("nan")
+    return {"plots_expected": int(sheet_count), "plots_kept": len(kept),
+            "self_overlap_sqm": round(overlap, 1), "gap_to_base_sqm": round(gap, 1),
+            "boundary_gap_m": round(snap, 2)}
 
 
 def run_village(village, base, out_dir, hand=None, stamp=None):
@@ -155,7 +177,7 @@ def run_village(village, base, out_dir, hand=None, stamp=None):
                           "geometry": hand[survey]})
             report.append({**common, "geometry_source": "your placement", "shape_match": "",
                            "area_ratio": "", "gcp_points": "", "gcp_residual_m": "",
-                           "plots": 1, "ambiguous_turn": "", "flag": ""})
+                           "plots_expected": 1, "plots_kept": 1, "ambiguous_turn": "", "flag": ""})
             continue
 
         sheet_gdf, outline = sheet_of(village, survey)
@@ -165,8 +187,9 @@ def run_village(village, base, out_dir, hand=None, stamp=None):
                           "shape_match": "", "area_ratio": "", "gcp_points": "",
                           "geometry": base_geom})
             report.append({**common, "geometry_source": "puvi base", "shape_match": "",
-                           "area_ratio": "", "gcp_points": "", "gcp_residual_m": "", "plots": 1,
-                           "ambiguous_turn": "", "flag": "no sheet"})
+                           "area_ratio": "", "gcp_points": "", "gcp_residual_m": "",
+                           "plots_expected": 1, "plots_kept": 1, "ambiguous_turn": "",
+                           "flag": "no sheet"})
             continue
 
         pose = place(outline, base_geom)
@@ -194,6 +217,10 @@ def run_village(village, base, out_dir, hand=None, stamp=None):
                               "shape_match": round(pose["match"], 3),
                               "area_ratio": round(pose["area_ratio"], 3),
                               "gcp_points": len(pairs), "geometry": g})
+            cons = conservation([p["geometry"] for p in plots[-len(sheet_gdf):]] if len(sheet_gdf) else [],
+                                len(sheet_gdf), base_geom, placed_outline)
+            if cons["plots_kept"] < cons["plots_expected"]:
+                flag = (flag + "; %d of %d plots kept" % (cons["plots_kept"], cons["plots_expected"])).strip("; ")
             if pairs:
                 gcp_dir.mkdir(parents=True, exist_ok=True)
                 rows = []
@@ -210,8 +237,7 @@ def run_village(village, base, out_dir, hand=None, stamp=None):
                            "area_ratio": round(pose["area_ratio"], 3),
                            "gcp_points": len(pairs),
                            "gcp_residual_m": round(float(np.median([p[2] for p in pairs])), 2) if pairs else "",
-                           "plots": len(sheet_gdf), "ambiguous_turn": int(pose["ambiguous"]),
-                           "flag": flag})
+                           "ambiguous_turn": int(pose["ambiguous"]), "flag": flag, **cons})
         else:
             # the shapes disagree: the base's shape stands, as agreed
             plots.append({**common, "geometry_source": "puvi base", "plot_no": "",
@@ -221,7 +247,7 @@ def run_village(village, base, out_dir, hand=None, stamp=None):
             report.append({**common, "geometry_source": "puvi base",
                            "shape_match": round(pose["match"], 3),
                            "area_ratio": round(pose["area_ratio"], 3), "gcp_points": 0,
-                           "gcp_residual_m": "", "plots": 1,
+                           "gcp_residual_m": "", "plots_expected": len(sheet_gdf), "plots_kept": 1,
                            "ambiguous_turn": int(pose["ambiguous"]), "flag": flag})
     return plots, report, unplaced
 
