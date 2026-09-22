@@ -46,11 +46,7 @@ def _nodes(geoms, grid=NODE_GRID_M):
     """
     out = {}
     for g in geoms:
-        if g is None or g.is_empty:
-            continue
-        for part in ([g] if g.geom_type == "Polygon" else list(g.geoms)):
-            if part.geom_type != "Polygon":
-                continue
+        for part in _polygons_of(g):
             for ring in [part.exterior, *part.interiors]:
                 for c in ring.coords:                       # some Puvi polygons carry a Z value
                     x, y = float(c[0]), float(c[1])
@@ -68,8 +64,27 @@ def _warp_table(nodes, points, disp, grid=NODE_GRID_M):
     return {k: tuple(c + s) for k, c, s in zip(keys, coords, shifts)}
 
 
-def _warp_with(geom, table, grid=NODE_GRID_M):
-    """Rebuild a polygon from the warped node table, so shared vertices stay shared."""
+def _polygons_of(geom):
+    """Every polygon inside a geometry, whatever container it arrived in.
+
+    Puvi survey 11 of Peramanur is a GeometryCollection, and the first whole-village run dropped it
+    because the warp only looked at Polygon and MultiPolygon.
+    """
+    if geom is None or geom.is_empty:
+        return []
+    if geom.geom_type == "Polygon":
+        return [geom]
+    if geom.geom_type in ("MultiPolygon", "GeometryCollection"):
+        return [x for g in geom.geoms for x in _polygons_of(g)]
+    return []
+
+
+def _warp_with(geom, table, grid=NODE_GRID_M, field=None):
+    """Rebuild a parcel from the warped node table, so shared vertices stay shared.
+
+    A parcel is never lost: if the rebuilt shape comes back empty or broken, the original is moved
+    rigidly by the field at its centroid instead.
+    """
     def ring(coords):
         out = []
         for c in coords:
@@ -80,10 +95,26 @@ def _warp_with(geom, table, grid=NODE_GRID_M):
     def poly(p):
         return Polygon(ring(p.exterior.coords), [ring(h.coords) for h in p.interiors])
 
-    out = poly(geom) if geom.geom_type == "Polygon" else MultiPolygon(
-        [poly(p) for p in geom.geoms if p.geom_type == "Polygon"])
-    return _valid(out)
+    parts = _polygons_of(geom)
+    out = _valid(MultiPolygon([poly(p) for p in parts])) if len(parts) > 1 else (
+        _valid(poly(parts[0])) if parts else None)
+    if out is not None and not out.is_empty:
+        return out
+    if field is not None and geom is not None and not geom.is_empty:
+        d = field(np.array(geom.centroid.coords[0]))
+        return _valid(affinity.translate(geom, float(d[0]), float(d[1])))
+    return _valid(geom)
 
+
+MEASURED_REACH_M = 150.0  # beyond this from a control parcel the correction is not evidenced
+
+# Measured 2026-09-22 by predicting each control parcel from the others, grouped by how far the
+# nearest remaining one is: under 150 m the fit works (Thirukatchur 24.0 -> 3.2 m); at 150 to 400 m
+# it did nothing (40.2 -> 39.4 m). A whole village reaches far past that (Thirukatchur's median
+# parcel is 759 m from the nearest placement, 35 % are over a kilometre), so those parcels get the
+# village's average correction and are labelled as not evidenced rather than scored.
+# The revenue village boundary is not a second source: its outline sits on Puvi's to the metre in
+# three villages, so it was digitised from the same survey and carries the same error.
 
 SEAM_REACH_M = 120.0   # how far across a village boundary to look for the neighbour's edge
 SEAM_STEP_M = 15.0     # sampling step along the shared frontage
@@ -130,6 +161,40 @@ def seam_control(target, fixed, reach=SEAM_REACH_M, step=SEAM_STEP_M, share=1.0)
 
 CLIP_GUARD = 0.25      # never take more than this share of a parcel to settle a village seam
 CLIP_MIN_M2 = 0.05
+
+
+def clip_siblings(gdf):
+    """Settle any overlap between two parcels of the same village; the larger one yields.
+
+    A field strong enough to close a village seam can fold slightly where it turns, which left
+    Peramanur with five overlapping pairs totalling 118 m2 on the whole-village run.
+    """
+    geoms = [_valid(g) if g is not None and not g.is_empty else g for g in gdf.geometry]
+    idx = gpd.GeoSeries([g for g in geoms if g is not None]).sindex
+    order = [i for i, g in enumerate(geoms) if g is not None]
+    fixed = 0
+    for pos, i in enumerate(order):
+        for k in idx.query(geoms[i], predicate="intersects"):
+            j = order[k]
+            if j <= i:
+                continue
+            a, b = geoms[i], geoms[j]
+            if a is None or b is None:
+                continue
+            inter = a.intersection(b)
+            if inter.is_empty or inter.area <= CLIP_MIN_M2:
+                continue
+            big, small = (i, j) if a.area >= b.area else (j, i)
+            if geoms[big].area > 0 and inter.area / geoms[big].area > CLIP_GUARD:
+                continue
+            cut = _valid(geoms[big].difference(geoms[small]))
+            if cut is None or cut.is_empty:
+                continue
+            geoms[big] = cut
+            fixed += 1
+    gdf["geometry"] = [g if g is not None and not g.is_empty else o
+                       for g, o in zip(geoms, gdf.geometry)]
+    return gdf, fixed
 
 
 def clip_village_overlaps(layers, authority):
@@ -314,7 +379,8 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
     table = _warp_table(_nodes(targets.geometry), cpoints, cdisp) if len(cpoints) else {}
     moved, source = [], []
     for (i, row), s in zip(targets.iterrows(), shifts):
-        moved.append(_warp_with(row.geometry, table) if table else row.geometry)
+        field = (lambda q: shiftfit.fit(cpoints, cdisp, q[None, :])[0][0]) if len(cpoints) else None
+        moved.append(_warp_with(row.geometry, table, field=field) if table else row.geometry)
         source.append("hand placed by the team" if row["key"] in control_keys else "puvi")
     out = targets.copy()
     out["geometry"] = moved
@@ -323,7 +389,13 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
     out["shift_x_m"] = [round(float(s[0]), 2) for s in shifts]
     out["shift_y_m"] = [round(float(s[1]), 2) for s in shifts]
     out["shift_m"] = [round(float(np.hypot(*s)), 2) for s in shifts]
+    if len(cpoints):
+        near = np.array([float(np.min(np.linalg.norm(cpoints - q, axis=1))) for q in tpoints])
+    else:
+        near = np.full(len(tpoints), np.inf)
     out["source"] = source
+    out["control_within_m"] = [round(float(d), 1) if np.isfinite(d) else "" for d in near]
+    out["evidence"] = ["measured" if d <= MEASURED_REACH_M else "not evidenced" for d in near]
     out["hand_placed"] = ["yes" if k in control_keys else "no" for k in targets["key"]]
     out["fit_method"] = method
     out["control_parcels"] = len(cpoints)
@@ -331,10 +403,14 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
     out["puvi_error_before_m"] = acc["before_median_m"] if acc["before_median_m"] is not None else ""
     out["run_at"] = stamp or shiftfit.run_stamp()
 
-    keep = ["village_code", "survey_no", "source", "hand_placed", "fit_method", "control_parcels",
+    keep = ["village_code", "survey_no", "source", "hand_placed", "evidence", "control_within_m",
+            "fit_method", "control_parcels",
             "shift_x_m", "shift_y_m", "shift_m", "expected_error_m", "puvi_error_before_m",
             "run_at", "geometry"]
     out = out[[c for c in keep if c in out.columns]]
+    out, fixed = clip_siblings(out)
+    if fixed:
+        log.info("%s: %d overlap(s) between parcels of this village settled", village, fixed)
     out_dir.mkdir(parents=True, exist_ok=True)
     dest = out_dir / ("%s_puvi_shifted.geojson" % village)
     out.to_crs(4326).to_file(dest, driver="GeoJSON", COORDINATE_PRECISION=8)

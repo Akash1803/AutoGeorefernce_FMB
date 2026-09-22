@@ -175,3 +175,45 @@ def test_the_clip_refuses_to_eat_a_parcel():
     layers, notes = shift_puvi.clip_village_overlaps({"A": anchored, "B": loose}, {"A": True, "B": False})
     assert layers["B"].geometry.iloc[0].area == 6400, "untouched"
     assert "refused by the guard" in notes[0]
+
+
+def test_the_reach_beyond_which_a_correction_is_not_evidenced_is_the_measured_one():
+    from autogeoref import shift_puvi
+    # measured on 2026-09-22: the fit worked under 150 m and did nothing at 150-400 m
+    assert shift_puvi.MEASURED_REACH_M == 150.0
+
+
+def test_two_parcels_of_one_village_that_overlap_are_settled_by_the_larger_one():
+    import geopandas as gpd
+    from shapely.geometry import Polygon
+    from autogeoref import shift_puvi
+    big = Polygon([(0, 0), (100, 0), (100, 100), (0, 100)])
+    small = Polygon([(95, 0), (150, 0), (150, 100), (95, 100)])
+    gdf = gpd.GeoDataFrame(geometry=[big, small], crs=32644)
+    out, fixed = shift_puvi.clip_siblings(gdf)
+    assert fixed == 1
+    assert out.geometry.iloc[0].intersection(out.geometry.iloc[1]).area < 0.01
+    assert abs(out.geometry.iloc[1].area - 5500) < 1.0, "the smaller parcel keeps its ground"
+
+
+def test_a_parcel_stored_as_a_mixed_collection_is_still_warped():
+    from shapely.geometry import GeometryCollection, LineString, Polygon
+    from autogeoref import shift_puvi
+    # Puvi stores Peramanur survey 11 like this: a polygon and a stray line in one geometry
+    poly = Polygon([(10, 10), (60, 10), (60, 60), (10, 60)])
+    mixed = GeometryCollection([poly, LineString([(0, 0), (5, 5)])])
+    points = np.array([[0.0, 0.0], [500.0, 0.0], [0.0, 500.0], [500.0, 500.0]])
+    disp = np.repeat(np.array([[4.0, -3.0]]), 4, axis=0)
+    table = shift_puvi._warp_table(shift_puvi._nodes([mixed]), points, disp)
+    out = shift_puvi._warp_with(mixed, table)
+    assert out is not None and not out.is_empty, "the parcel survives"
+    assert abs(out.area - poly.area) < 1.0
+    assert abs(out.centroid.x - (poly.centroid.x + 4.0)) < 0.2
+
+
+def test_a_parcel_is_never_lost_even_if_the_warp_fails():
+    from shapely.geometry import Polygon
+    from autogeoref import shift_puvi
+    poly = Polygon([(10, 10), (60, 10), (60, 60), (10, 60)])
+    out = shift_puvi._warp_with(poly, {}, field=lambda q: np.array([5.0, 0.0]))
+    assert out is not None and not out.is_empty
