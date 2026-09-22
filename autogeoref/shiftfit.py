@@ -19,8 +19,15 @@ whole village block (share 0.02, drifts to the edge of the search box), and matc
 sheet outline positioned by Puvi (8.3 m -> 17.6 m, margin under 0.12 everywhere). The satellite can
 confirm a placement; at this image quality it cannot decide one within 20 m.
 
-Only a translation is applied. Shape, size, rotation and area are left exactly as Puvi drew them,
-which is what the task asked for. Nothing existing is deleted or edited: outputs are new files.
+Parcels are moved through one smooth field rather than each by its own vector. Moving each parcel
+on its own splits every boundary two of them share, which is the double line Akash saw on
+2026-09-22: 55 overlapping pairs in Thirukatchur where Puvi had none, and the length of shared
+drawn lines halved. Evaluating the field at each distinct vertex instead keeps the fabric closed:
+zero overlaps, zero new gaps, shared lines back to 9146 m of Puvi's 9095 m. The cost is that a
+parcel is no longer moved perfectly rigidly; with the tuned field the area change is 2 % at the
+90th percentile and 8.3 % at worst, against 9 to 18 % and 57 % before tuning.
+
+Nothing existing is deleted or edited: outputs are new files.
 """
 import csv
 import datetime
@@ -33,9 +40,17 @@ from . import paths
 log = logging.getLogger(__name__)
 
 IDW_MIN_CONTROL = 4     # below this a local field is guesswork: one mean shift is used instead
-IDW_K = 4               # control points that vote for a target
-IDW_POWER = 2.0         # inverse-distance weight exponent
-FAR_CONTROL_M = 1500.0  # a control point further than this from a target only votes if nothing closer
+IDW_K = 12              # control points that vote for a point
+IDW_POWER = 1.0         # inverse-distance weight exponent
+IDW_SMOOTH_M = 60.0     # a control point never outvotes the rest from closer than this
+
+# Why these and not a sharper field: a sharp field pulls the near side of a parcel much harder than
+# the far side, which distorts it. Measured on 2026-09-22 over the three villages that have control
+# (leave-one-out error, then the 90th percentile of the area change the warp causes):
+#   k=4  power=2 no smoothing : 4.0 / 3.6 / 5.5 m, area 9.0 / 6.8 / 18.2 %, worst 57 %
+#   k=12 power=1 smooth 60 m  : 3.8 / 3.6 / 6.0 m, area 2.2 / 1.7 /  2.2 %, worst  8 %
+#   all  power=1 smooth 120 m : 5.1 / 4.2 / 5.2 m, area 1.4 / 0.6 /  1.2 %, worst  4 %
+# The middle row is as accurate as the sharp field and holds the shapes, so it is the default.
 
 
 def normalise(survey):
@@ -48,18 +63,32 @@ def mean_shift(disp):
     return np.asarray(disp, float).mean(axis=0)
 
 
-def idw(points, disp, target, k=IDW_K, power=IDW_POWER):
-    """Inverse-distance weighted displacement at `target`, from control at `points`."""
+def idw(points, disp, target, k=IDW_K, power=IDW_POWER, smooth=IDW_SMOOTH_M):
+    """Inverse-distance weighted displacement at `target`, from control at `points`.
+
+    `smooth` is a floor on the distance, so a control point a metre away does not drown out the
+    twelve around it: without it the field has a spike at every control parcel and a parcel sitting
+    on one is stretched (up to 57 % of its area on the first run).
+    """
     points = np.asarray(points, float)
     disp = np.asarray(disp, float)
-    d = np.linalg.norm(points - np.asarray(target, float), axis=1)
     if len(points) == 0:
         return np.zeros(2)
-    if (d < 1e-6).any():
-        return disp[int(np.argmin(d))]
+    d = np.linalg.norm(points - np.asarray(target, float), axis=1)
     near = np.argsort(d)[:min(k, len(points))]
-    w = 1.0 / d[near] ** power
+    w = 1.0 / (d[near] ** power + smooth ** power)
     return (w @ disp[near]) / w.sum()
+
+
+def warp_points(points, disp, coords, min_control=IDW_MIN_CONTROL):
+    """Displacement for arbitrary coordinates, evaluated point by point.
+
+    Moving whole parcels by one vector each splits every boundary two parcels share: the 2026-09-22
+    run left 55 overlapping pairs in Thirukatchur where Puvi had none, and halved the length of
+    shared drawn lines. Evaluating the same field at each vertex instead means two parcels that
+    share a vertex share its movement, so the fabric stays closed.
+    """
+    return fit(points, disp, coords, min_control=min_control)
 
 
 def fit(points, disp, targets, min_control=IDW_MIN_CONTROL):
@@ -106,7 +135,7 @@ def accuracy(points, disp, min_control=IDW_MIN_CONTROL):
     }
 
 
-REPORT_COLUMNS = ["village_code", "village_name", "control", "targets", "method",
+REPORT_COLUMNS = ["village_code", "village_name", "control", "targets", "method", "seam_note",
                   "before_median_m", "before_p90_m", "after_median_m", "after_p90_m", "after_max_m",
                   "mean_shift_x_m", "mean_shift_y_m", "run_at"]
 

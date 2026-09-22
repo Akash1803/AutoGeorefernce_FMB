@@ -18,19 +18,35 @@ def test_a_few_control_points_give_one_mean_shift_to_the_whole_village():
 
 
 def test_enough_control_lets_each_parcel_follow_its_neighbours():
-    # a village where the error is +10 m north at one end and -10 m at the other
-    points = np.array([[0.0, 0.0], [0.0, 100.0], [100.0, 0.0], [100.0, 100.0], [50.0, 50.0]])
+    # a village a kilometre across where the error is +10 m north at one end, -10 m at the other
+    points = np.array([[0.0, 0.0], [0.0, 1000.0], [1000.0, 0.0], [1000.0, 1000.0], [500.0, 500.0]])
     disp = np.array([[0.0, 10.0], [0.0, 10.0], [0.0, -10.0], [0.0, -10.0], [0.0, 0.0]])
-    shifts, method = shiftfit.fit(points, disp, np.array([[5.0, 50.0], [95.0, 50.0]]))
+    shifts, method = shiftfit.fit(points, disp, np.array([[50.0, 500.0], [950.0, 500.0]]))
     assert method == "local field"
-    assert shifts[0][1] > 3.0 and shifts[1][1] < -3.0, "each end keeps its own sign"
+    # the field is deliberately gentle, so the ends are pulled apart but not all the way to the
+    # +-10 m the control says: what matters is that each end follows the control nearest it
+    assert shifts[0][1] > 2.0 and shifts[1][1] < -2.0, "each end keeps its own sign"
+    assert abs(shifts[0][1] + shifts[1][1]) < 0.5, "and symmetrically"
 
 
-def test_a_target_on_top_of_a_control_point_takes_its_displacement_exactly():
+def test_a_target_leans_towards_the_control_it_sits_on_without_being_yanked_onto_it():
+    # the field is smoothed on purpose: a control point a metre away must not outvote the rest,
+    # or a parcel straddling it is torn. So the answer leans to 3.0 without reaching it.
     points = np.array([[0.0, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]])
     disp = np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0]])
     shifts, _ = shiftfit.fit(points, disp, points[2][None, :])
-    assert np.allclose(shifts[0], [3.0, 3.0])
+    others = shiftfit.fit(points, disp, np.array([[5.0, 5.0]]))[0][0]
+    assert shifts[0][0] > others[0], "closer to the control it sits on than the middle of the village is"
+    assert 2.0 < shifts[0][0] < 3.0
+
+
+def test_the_smoothing_distance_is_what_keeps_a_parcel_from_being_torn():
+    # two vertices of one parcel, a metre apart, must not be given wildly different moves
+    points = np.array([[0.0, 0.0], [300.0, 0.0], [0.0, 300.0], [300.0, 300.0], [150.0, 150.0]])
+    disp = np.array([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [30.0, 0.0]])
+    a = shiftfit.idw(points, disp, np.array([150.0, 150.0]))
+    b = shiftfit.idw(points, disp, np.array([151.0, 150.0]))
+    assert abs(a[0] - b[0]) < 0.2, "a metre apart, moved within 20 cm of each other"
 
 
 def test_leave_one_out_reports_the_error_on_unseen_control():
@@ -59,3 +75,103 @@ def test_a_control_parcel_far_from_its_puvi_twin_is_not_control():
     # the same survey number exists in two villages; the wrong one sits kilometres away
     from autogeoref import shift_puvi
     assert shift_puvi.MAX_CONTROL_M <= 200.0, "a plausible cadastral error, not a village apart"
+
+
+def test_two_parcels_that_share_a_boundary_still_share_it_after_the_warp():
+    from shapely.geometry import Polygon
+    from autogeoref import shift_puvi
+    # the field pulls harder on the right than on the left
+    points = np.array([[0.0, 0.0], [0.0, 400.0], [800.0, 0.0], [800.0, 400.0]])
+    disp = np.array([[0.0, 0.0], [0.0, 0.0], [20.0, 5.0], [20.0, 5.0]])
+    left = Polygon([(0, 0), (400, 0), (400, 400), (0, 400)])
+    right = Polygon([(400, 0), (800, 0), (800, 400), (400, 400)])
+    table = shift_puvi._warp_table(shift_puvi._nodes([left, right]), points, disp)
+    a = shift_puvi._warp_with(left, table)
+    b = shift_puvi._warp_with(right, table)
+    assert a.intersection(b).area < 0.01, "no sliver of overlap"
+    merged = a.union(b)
+    assert merged.geom_type == "Polygon" and len(list(merged.interiors)) == 0, "and no gap between them"
+    assert a.boundary.buffer(0.01).intersection(b.boundary).length > 380, "the shared line is one line"
+
+
+def test_the_warp_moves_a_parcel_by_the_field():
+    from shapely.geometry import Polygon
+    from autogeoref import shift_puvi
+    points = np.array([[0.0, 0.0], [500.0, 0.0], [0.0, 500.0], [500.0, 500.0]])
+    disp = np.repeat(np.array([[3.0, -7.0]]), 4, axis=0)
+    p = Polygon([(100, 100), (300, 100), (300, 300), (100, 300)])
+    w = shift_puvi._warp_with(p, shift_puvi._warp_table(shift_puvi._nodes([p]), points, disp))
+    assert abs(w.centroid.x - (p.centroid.x + 3.0)) < 0.01
+    assert abs(w.centroid.y - (p.centroid.y - 7.0)) < 0.01
+    assert abs(w.area - p.area) < 0.5, "a uniform field is a plain shift: the area is unchanged"
+
+
+def test_neighbours_whose_vertices_differ_by_millimetres_still_move_as_one():
+    from shapely.geometry import Polygon
+    from autogeoref import shift_puvi
+    points = np.array([[0.0, 0.0], [0.0, 400.0], [800.0, 0.0], [800.0, 400.0]])
+    disp = np.array([[0.0, 0.0], [0.0, 0.0], [20.0, 5.0], [20.0, 5.0]])
+    left = Polygon([(0, 0), (400, 0), (400, 400), (0, 400)])
+    right = Polygon([(400.003, 0.002), (800, 0), (800, 400), (399.998, 399.997)])  # as Puvi draws it
+    table = shift_puvi._warp_table(shift_puvi._nodes([left, right]), points, disp)
+    a, b = shift_puvi._warp_with(left, table), shift_puvi._warp_with(right, table)
+    assert a.intersection(b).area < 0.001, "no hairline overlap"
+    merged = a.union(b)
+    assert merged.geom_type == "Polygon" and len(list(merged.interiors)) == 0, "no hairline gap"
+
+
+def test_seam_control_pulls_a_village_edge_onto_its_neighbour():
+    from shapely.geometry import Polygon
+    from autogeoref import shift_puvi
+    # two villages digitised apart: a 20 m gap along a 400 m frontage
+    left = Polygon([(0, 0), (400, 0), (400, 400), (0, 400)])
+    right = Polygon([(420, 0), (800, 0), (800, 400), (420, 400)])
+    pts, disp = shift_puvi.seam_control(right, left, share=1.0)
+    assert len(pts) > 5, "the frontage is sampled"
+    facing = [d for p_, d in zip(pts, disp) if p_[0] < 430]
+    assert facing and all(d[0] < -5.0 for d in facing), "the facing edge is pulled west onto the neighbour"
+
+
+def test_seam_control_shares_the_move_when_neither_side_is_an_authority():
+    from shapely.geometry import Polygon
+    from autogeoref import shift_puvi
+    left = Polygon([(0, 0), (400, 0), (400, 400), (0, 400)])
+    right = Polygon([(420, 0), (800, 0), (800, 400), (420, 400)])
+    _, full = shift_puvi.seam_control(right, left, share=1.0)
+    _, half = shift_puvi.seam_control(right, left, share=0.5)
+    assert abs(half[0][0] * 2 - full[0][0]) < 1e-6, "half the distance each"
+
+
+def test_seam_control_is_quiet_when_the_villages_already_meet():
+    from shapely.geometry import Polygon
+    from autogeoref import shift_puvi
+    left = Polygon([(0, 0), (400, 0), (400, 400), (0, 400)])
+    right = Polygon([(400, 0), (800, 0), (800, 400), (400, 400)])
+    pts, disp = shift_puvi.seam_control(right, left)
+    moves = [abs(d[0]) + abs(d[1]) for p_, d in zip(pts, disp) if p_[0] < 410]
+    assert not moves or max(moves) < 1.0, "nothing to close along a boundary already shared"
+
+
+def test_a_village_seam_overlap_is_clipped_out_of_the_side_without_our_placements():
+    import geopandas as gpd
+    from shapely.geometry import Polygon
+    from autogeoref import shift_puvi
+    anchored = gpd.GeoDataFrame(geometry=[Polygon([(0, 0), (100, 0), (100, 100), (0, 100)])], crs=32644)
+    loose = gpd.GeoDataFrame(geometry=[Polygon([(90, 0), (200, 0), (200, 100), (90, 100)])], crs=32644)
+    layers, notes = shift_puvi.clip_village_overlaps({"A": anchored, "B": loose}, {"A": True, "B": False})
+    assert layers["A"].geometry.iloc[0].area == 10000, "the anchored village is untouched"
+    assert abs(layers["B"].geometry.iloc[0].area - 10000) < 1.0, "the other gives up the disputed strip"
+    assert notes and "B yielded" in notes[0]
+
+
+def test_the_clip_refuses_to_eat_a_parcel():
+    import geopandas as gpd
+    from shapely.geometry import Polygon
+    from autogeoref import shift_puvi
+    anchored = gpd.GeoDataFrame(geometry=[Polygon([(0, 0), (100, 0), (100, 100), (0, 100)])], crs=32644)
+    # this parcel lies almost entirely inside the anchored village: moving it is a placement
+    # question, not a seam, so the guard leaves it alone
+    loose = gpd.GeoDataFrame(geometry=[Polygon([(10, 10), (90, 10), (90, 90), (10, 90)])], crs=32644)
+    layers, notes = shift_puvi.clip_village_overlaps({"A": anchored, "B": loose}, {"A": True, "B": False})
+    assert layers["B"].geometry.iloc[0].area == 6400, "untouched"
+    assert "refused by the guard" in notes[0]

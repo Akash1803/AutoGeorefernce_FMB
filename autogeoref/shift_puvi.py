@@ -6,12 +6,13 @@
 Control is the team's own placements: every `<survey>_parcels_modified.gpkg` in the village folder,
 plus any file named with `--control`, which is how the Thailavaram merged layer comes in. The
 displacement between a control parcel and its Puvi twin is measured at the centroid, the field is
-fitted by `shiftfit`, and every Puvi polygon in scope is translated by it. Nothing is rotated,
-scaled or reshaped, nothing existing is edited, and a village with no control is written out
-unchanged and marked so.
+fitted by `shiftfit`, and every distinct vertex in the village is moved through it once, so two
+parcels that share a boundary keep sharing it. Nothing existing is edited, and a village with no
+control is written out unchanged and marked so.
 """
 import argparse
 import datetime
+import itertools
 import logging
 import sys
 
@@ -19,6 +20,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 from shapely import affinity
+from shapely.geometry import MultiPolygon, Polygon
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
@@ -29,6 +31,153 @@ log = logging.getLogger(__name__)
 MAX_CONTROL_M = 200.0   # a control parcel further than this from its Puvi twin is a key clash
 STRETCH = ["35_04_052", "35_04_054", "35_04_056", "35_04_076", "35_04_077", "35_04_074"]
 UTM = 32644
+
+
+NODE_GRID_M = 0.01   # two vertices this close are the same drawn point, and move together
+
+
+def _nodes(geoms, grid=NODE_GRID_M):
+    """Every distinct vertex of the parcels, on a centimetre grid.
+
+    Puvi's neighbours draw a shared boundary with coordinates that agree to a few millimetres but
+    are not the same numbers. Warping each polygon on its own then leaves hairline slivers along
+    every shared line (594 of them, averaging 0.15 m2, on the first warp). Snapping to a grid and
+    moving each distinct node once makes a shared line one line again.
+    """
+    out = {}
+    for g in geoms:
+        if g is None or g.is_empty:
+            continue
+        for part in ([g] if g.geom_type == "Polygon" else list(g.geoms)):
+            if part.geom_type != "Polygon":
+                continue
+            for ring in [part.exterior, *part.interiors]:
+                for c in ring.coords:                       # some Puvi polygons carry a Z value
+                    x, y = float(c[0]), float(c[1])
+                    out[(round(x / grid), round(y / grid))] = (x, y)
+    return out
+
+
+def _warp_table(nodes, points, disp, grid=NODE_GRID_M):
+    """Where each distinct node lands. One field evaluation per node, not per polygon."""
+    keys = list(nodes)
+    coords = np.array([nodes[k] for k in keys], float)
+    if not len(coords):
+        return {}
+    shifts, _ = shiftfit.fit(points, disp, coords)
+    return {k: tuple(c + s) for k, c, s in zip(keys, coords, shifts)}
+
+
+def _warp_with(geom, table, grid=NODE_GRID_M):
+    """Rebuild a polygon from the warped node table, so shared vertices stay shared."""
+    def ring(coords):
+        out = []
+        for c in coords:
+            x, y = float(c[0]), float(c[1])
+            out.append(table.get((round(x / grid), round(y / grid)), (x, y)))
+        return out
+
+    def poly(p):
+        return Polygon(ring(p.exterior.coords), [ring(h.coords) for h in p.interiors])
+
+    out = poly(geom) if geom.geom_type == "Polygon" else MultiPolygon(
+        [poly(p) for p in geom.geoms if p.geom_type == "Polygon"])
+    return _valid(out)
+
+
+SEAM_REACH_M = 120.0   # how far across a village boundary to look for the neighbour's edge
+SEAM_STEP_M = 15.0     # sampling step along the shared frontage
+
+
+def seam_control(target, fixed, reach=SEAM_REACH_M, step=SEAM_STEP_M, share=1.0):
+    """Control points that pull one village's edge onto its neighbour's.
+
+    Puvi digitises each village on its own, so along a shared boundary the two layers overlap by
+    thousands of square metres or stand apart: 8363 m2 between Thailavaram and Potheri, a 19 m gap
+    between Kattankulathur and Peramanur. Sampling the frontage and asking each sampled point to
+    move onto the neighbour's edge gives the field the same kind of observation a hand placement
+    gives it, so the seam closes by moving parcels rather than by stretching them.
+
+    `share` is how much of the distance this side takes: 1.0 when the neighbour is already correct
+    and must not move, 0.5 when neither side is an authority and they should meet in the middle.
+    """
+    if target is None or fixed is None or target.is_empty or fixed.is_empty:
+        return np.zeros((0, 2)), np.zeros((0, 2))
+    tb, fb = target.boundary, fixed.boundary
+    n = max(2, int(tb.length / step))
+    pts, disp = [], []
+    for i in range(n + 1):
+        t = i / n
+        p = tb.interpolate(t, normalized=True)
+        q = fb.interpolate(fb.project(p))
+        d = p.distance(q)
+        if d < 0.05 or d > reach:
+            continue
+        # the neighbour must lie across this piece of boundary, not along it: without this test a
+        # point just past a shared corner is dragged sideways onto that corner
+        ahead = tb.interpolate(min(1.0, t + step / max(tb.length, 1.0)), normalized=True)
+        tangent = np.array([ahead.x - p.x, ahead.y - p.y])
+        to_q = np.array([q.x - p.x, q.y - p.y])
+        nt, nq = np.linalg.norm(tangent), np.linalg.norm(to_q)
+        if nt < 1e-9 or nq < 1e-9:
+            continue
+        if abs(float(tangent @ to_q) / (nt * nq)) > 0.5:
+            continue
+        pts.append((p.x, p.y))
+        disp.append((to_q[0] * share, to_q[1] * share))
+    return np.array(pts) if pts else np.zeros((0, 2)), np.array(disp) if disp else np.zeros((0, 2))
+
+
+CLIP_GUARD = 0.25      # never take more than this share of a parcel to settle a village seam
+CLIP_MIN_M2 = 0.05
+
+
+def clip_village_overlaps(layers, authority):
+    """Settle the land two villages both claim. Returns (layers, notes).
+
+    Puvi draws each village separately, so along a shared boundary they overlap: 1071 m2 between
+    Kizhikaranai and Thirukatchur before anything was moved. Where both villages are anchored to
+    our own placements neither can be moved to fix it, so the disputed strip is clipped out of one
+    side, parcel by parcel, and never by more than a quarter of a parcel.
+    """
+    notes = []
+    bodies = {v: unary_union([g for g in gdf.geometry if g is not None and not g.is_empty])
+              for v, gdf in layers.items()}
+    for a, b in itertools.combinations(sorted(layers), 2):
+        inter = bodies[a].intersection(bodies[b])
+        if inter.is_empty or inter.area <= CLIP_MIN_M2:
+            continue
+        # the village with our placements keeps its ground; otherwise the larger one yields
+        if authority.get(a) and not authority.get(b):
+            yielder, keeper = b, a
+        elif authority.get(b) and not authority.get(a):
+            yielder, keeper = a, b
+        else:
+            yielder, keeper = (a, b) if bodies[a].area >= bodies[b].area else (b, a)
+        gdf = layers[yielder]
+        taken = 0.0
+        refused = 0
+        geoms = list(gdf.geometry)
+        for i, g in enumerate(geoms):
+            if g is None or g.is_empty:
+                continue
+            piece = g.intersection(bodies[keeper])
+            if piece.is_empty or piece.area <= CLIP_MIN_M2:
+                continue
+            if g.area > 0 and piece.area / g.area > CLIP_GUARD:
+                refused += 1
+                continue
+            cut = _valid(g.difference(bodies[keeper]))
+            if cut is None or cut.is_empty:
+                refused += 1
+                continue
+            geoms[i] = cut
+            taken += piece.area
+        gdf["geometry"] = geoms
+        bodies[yielder] = unary_union([g for g in geoms if g is not None and not g.is_empty])
+        notes.append("%s yielded %.0f m2 to %s%s"
+                     % (yielder, taken, keeper, ", %d parcel(s) refused by the guard" % refused if refused else ""))
+    return layers, notes
 
 
 def _valid(geom):
@@ -96,8 +245,12 @@ def village_name(village, puvi):
     return village
 
 
-def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None):
-    """Write the corrected polygons for one village. Returns the report row."""
+def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None, seams=()):
+    """Write the corrected polygons for one village. Returns the report row.
+
+    `seams` is a list of (neighbour geometry, share) already placed, used only when the village has
+    no hand control of its own: its edge is pulled onto theirs so the corridor is continuous.
+    """
     puvi = puvi_polygons(village)
     if not len(puvi):
         log.warning("%s: no Puvi vector found", village)
@@ -132,19 +285,37 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
     cpoints = np.array(cpoints) if cpoints else np.zeros((0, 2))
     cdisp = np.array(cdisp) if cdisp else np.zeros((0, 2))
 
+    acc = shiftfit.accuracy(cpoints, cdisp)
+    seam_note = ""
+    if len(cpoints) == 0 and seams:
+        # no placement of ours anywhere in this village: the only thing known about it is that its
+        # edge must meet the villages already corrected beside it
+        body = unary_union(list(targets.geometry))
+        sp, sd = [], []
+        for neighbour, share in seams:
+            a, b = seam_control(body, neighbour, share=share)
+            if len(a):
+                sp.append(a); sd.append(b)
+        if sp:
+            cpoints = np.vstack(sp)
+            cdisp = np.vstack(sd)
+            seam_note = "%d seam points against %d corrected neighbour(s)" % (len(cpoints), len(sp))
+            log.info("%s: no control of our own, %s", village, seam_note)
+
     tpoints = np.array([g.centroid.coords[0] for g in targets.geometry])
     shifts, method = shiftfit.fit(cpoints, cdisp, tpoints)
-    acc = shiftfit.accuracy(cpoints, cdisp)
+    if seam_note:
+        method = "seam to corrected neighbour"
 
-    moved, source = [], []
+    # every parcel is warped through the same field, including the ones the team has placed by
+    # hand: mixing two sources of geometry in one layer is what draws a double line along every
+    # boundary between them. Their own files stay the authority and are untouched.
     control_keys = {k for k, _ in pairs}
+    table = _warp_table(_nodes(targets.geometry), cpoints, cdisp) if len(cpoints) else {}
+    moved, source = [], []
     for (i, row), s in zip(targets.iterrows(), shifts):
-        if row["key"] in control_keys:
-            moved.append(control[row["key"]])          # the team placed it: their geometry stands
-            source.append("team placement")
-        else:
-            moved.append(affinity.translate(row.geometry, float(s[0]), float(s[1])))
-            source.append("puvi shifted")
+        moved.append(_warp_with(row.geometry, table) if table else row.geometry)
+        source.append("hand placed by the team" if row["key"] in control_keys else "puvi")
     out = targets.copy()
     out["geometry"] = moved
     out["village_code"] = village
@@ -153,13 +324,14 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
     out["shift_y_m"] = [round(float(s[1]), 2) for s in shifts]
     out["shift_m"] = [round(float(np.hypot(*s)), 2) for s in shifts]
     out["source"] = source
+    out["hand_placed"] = ["yes" if k in control_keys else "no" for k in targets["key"]]
     out["fit_method"] = method
     out["control_parcels"] = len(cpoints)
     out["expected_error_m"] = acc["after_median_m"] if acc["after_median_m"] is not None else ""
     out["puvi_error_before_m"] = acc["before_median_m"] if acc["before_median_m"] is not None else ""
     out["run_at"] = stamp or shiftfit.run_stamp()
 
-    keep = ["village_code", "survey_no", "source", "fit_method", "control_parcels",
+    keep = ["village_code", "survey_no", "source", "hand_placed", "fit_method", "control_parcels",
             "shift_x_m", "shift_y_m", "shift_m", "expected_error_m", "puvi_error_before_m",
             "run_at", "geometry"]
     out = out[[c for c in keep if c in out.columns]]
@@ -170,6 +342,7 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
 
     return {"village_code": village, "village_name": village_name(village, puvi),
             "control": len(cpoints), "targets": len(out), "method": method,
+            "seam_note": seam_note,
             "mean_shift_x_m": round(float(cdisp.mean(0)[0]), 2) if len(cdisp) else "",
             "mean_shift_y_m": round(float(cdisp.mean(0)[1]), 2) if len(cdisp) else "",
             "run_at": out["run_at"].iloc[0], **{k: v for k, v in acc.items() if k != "control"}}
@@ -186,6 +359,10 @@ def main(argv=None):
                     help="every survey of the village, not just the buffer")
     ap.add_argument("--control", action="append", default=[],
                     help="extra control file with a survey_no column (repeatable)")
+    ap.add_argument("--no-seams", action="store_true",
+                    help="do not pull a village with no control onto its corrected neighbours")
+    ap.add_argument("--no-clip", action="store_true",
+                    help="leave land that two villages both claim as it is")
     ap.add_argument("--out", default="", help="output folder (default: <project>\\Puvi_Shifted\\<date>)")
     args = ap.parse_args(argv)
 
@@ -194,15 +371,62 @@ def main(argv=None):
         ap.error("name at least one village, or pass --stretch")
     stamp = shiftfit.run_stamp()
     out_dir = __import__("pathlib").Path(args.out) if args.out else shiftfit.output_dir()
-    rows = []
-    for v in dict.fromkeys(villages):
+    villages = list(dict.fromkeys(villages))
+    has_control = {}
+    for v in villages:
+        puvi = puvi_polygons(v)
+        keys = set(puvi["key"])
+        has_control[v] = any(k in keys for k in control_parcels(v, args.control))
+    order = [v for v in villages if has_control[v]] + [v for v in villages if not has_control[v]]
+    if order != villages:
+        log.info("villages with our own placements go first: %s", order)
+
+    rows, placed = [], {}
+    for v in order:
+        seams = []
+        if not has_control[v] and not args.no_seams:
+            body = unary_union(list(puvi_polygons(v).geometry))
+            for other, geom in placed.items():
+                if body.distance(geom) <= SEAM_REACH_M:
+                    seams.append((geom, 1.0 if has_control[other] else 0.5))
         row = run_village(v, out_dir, buffer_only=args.buffer_only,
-                          extra_control=args.control, stamp=stamp)
+                          extra_control=args.control, stamp=stamp, seams=seams)
         if row:
             rows.append(row)
+            written = gpd.read_file(out_dir / ("%s_puvi_shifted.geojson" % v)).to_crs(UTM)
+            placed[v] = unary_union([x for x in (_valid(g) for g in written.geometry) if x is not None])
     if not rows:
         log.error("nothing written")
         return 1
+    # a village placed before its neighbours only saw some of them: run the seam pass again now
+    # that every village has a position
+    if not args.no_seams:
+        for v in [x for x in order if not has_control[x]]:
+            body = unary_union(list(puvi_polygons(v).geometry))
+            seams = [(geom, 1.0 if has_control[other] else 0.5)
+                     for other, geom in placed.items()
+                     if other != v and body.distance(geom) <= SEAM_REACH_M]
+            if not seams:
+                continue
+            row = run_village(v, out_dir, buffer_only=args.buffer_only,
+                              extra_control=args.control, stamp=stamp, seams=seams)
+            if row:
+                rows = [r for r in rows if r["village_code"] != v] + [row]
+                written = gpd.read_file(out_dir / ("%s_puvi_shifted.geojson" % v)).to_crs(UTM)
+                placed[v] = unary_union([x for x in (_valid(g) for g in written.geometry) if x is not None])
+
+    # land two villages both claim, which no amount of moving can settle
+    layers = {r["village_code"]: gpd.read_file(out_dir / ("%s_puvi_shifted.geojson" % r["village_code"])).to_crs(UTM)
+              for r in rows}
+    if not args.no_clip:
+        layers, notes = clip_village_overlaps(layers, has_control)
+        for n in notes:
+            log.info("village seam: %s", n)
+        for v, gdf in layers.items():
+            gdf.to_crs(4326).to_file(out_dir / ("%s_puvi_shifted.geojson" % v),
+                                     driver="GeoJSON", COORDINATE_PRECISION=8)
+
+    rows = sorted(rows, key=lambda r: order.index(r["village_code"]))
     merged = pd.concat([gpd.read_file(out_dir / ("%s_puvi_shifted.geojson" % r["village_code"]))
                         for r in rows], ignore_index=True)
     gpd.GeoDataFrame(merged, crs=4326).to_file(out_dir / "puvi_shifted_all.geojson",
@@ -210,7 +434,7 @@ def main(argv=None):
     shiftfit.write_report(rows, out_dir / "shift_report.csv")
     print("\n%-16s %8s %8s %-12s %10s %10s" % ("village", "control", "parcels", "method", "before", "after"))
     for r in rows:
-        print("%-16s %8d %8d %-12s %9s m %9s m"
+        print("%-16s %8d %8d %-28s %9s m %9s m"
               % (r["village_name"][:16], r["control"], r["targets"], r["method"],
                  r["before_median_m"] if r["before_median_m"] is not None else "-",
                  r["after_median_m"] if r["after_median_m"] is not None else "-"))
