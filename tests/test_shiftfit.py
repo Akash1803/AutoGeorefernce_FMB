@@ -399,3 +399,49 @@ def test_contested_land_is_settled_again_after_the_last_track_correction():
     track = src.index("after the village seams were clipped")
     second = src.index("village seam, second pass")
     assert first < track < second, "clip, settle the track, then clip what that re-opened"
+
+
+def test_station_land_is_too_wide_for_its_centre_so_the_sheet_decides():
+    from autogeoref import shift_puvi
+    # Peramanur 77 is 57 m across: wider than a running corridor, narrower than a field block
+    assert shift_puvi.RAIL_MAX_WIDTH_M < 57.0 < shift_puvi.RAIL_WIDE_MAX_M
+    # and survey 43, 610 m across, stays out on width alone
+    assert 610.0 > shift_puvi.RAIL_WIDE_MAX_M
+
+
+def test_rail_parcels_are_moved_bodily_onto_the_track_at_the_end():
+    import inspect
+    from autogeoref import shift_puvi
+    src = inspect.getsource(shift_puvi.main)
+    assert "moved onto the track" in src, (
+        "a field smooth enough to keep the fabric drags the neighbours off the track too")
+
+
+def test_moving_a_rail_parcel_onto_the_track_keeps_its_shape():
+    import geopandas as gpd
+    from shapely.geometry import LineString, Polygon
+    from autogeoref import shift_puvi
+    line = LineString([(0, 0), (0, 1000)])
+    strip = Polygon([(-30, 100), (-6, 100), (-6, 400), (-30, 400)])   # 24 m wide, 15 m off
+    gdf = gpd.GeoDataFrame({"survey_no": ["9"]}, geometry=[strip], crs=32644)
+    out, moved = shift_puvi.place_rail_parcels_on_track(gdf, "x", line, 0.0)
+    # no engine knowledge in a test, so nothing is recognised as rail land and nothing moves
+    assert moved == [] and out.geometry.iloc[0].equals(strip)
+
+
+def test_what_the_rail_moves_break_is_repaired_before_writing():
+    import inspect
+    from autogeoref import shift_puvi
+    src = inspect.getsource(shift_puvi.main)
+    move = src.index("moved onto the track")
+    repair = src.index("_repair(_valid(g))")
+    assert move < repair, "move the parcels, then settle and repair what that disturbed"
+
+
+def test_repair_makes_a_torn_parcel_valid_without_losing_it():
+    from shapely.geometry import Polygon
+    from autogeoref import shift_puvi
+    bowtie = Polygon([(0, 0), (10, 10), (10, 0), (0, 10)])
+    assert not bowtie.is_valid
+    fixed = shift_puvi._repair(bowtie)
+    assert fixed.is_valid and fixed.area > 0

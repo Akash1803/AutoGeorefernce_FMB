@@ -19,7 +19,7 @@ import sys
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from shapely import affinity
+from shapely import affinity, set_precision
 from shapely.geometry import MultiPolygon, Polygon
 from shapely.ops import unary_union
 from shapely.validation import make_valid
@@ -69,6 +69,32 @@ def _warp_table(nodes, points, disp, grid=NODE_GRID_M, **fit_kw):
         return {}
     shifts, _ = shiftfit.fit(points, disp, coords, **fit_kw)
     return {k: tuple(c + s) for k, c, s in zip(keys, coords, shifts)}
+
+
+def _snap_or_keep(geom, grid=1e-9):
+    """Snap to a fine grid so the parcel survives being written in degrees; keep it if that fails."""
+    if geom is None or geom.is_empty:
+        return geom
+    try:
+        snapped = _repair(set_precision(geom, grid))
+        if snapped is not None and not snapped.is_empty:
+            return snapped
+    except Exception:
+        pass
+    return _repair(geom)
+
+
+def _repair(geom):
+    """Make a parcel valid again after a difference, without dropping any of it."""
+    if geom is None or geom.is_empty:
+        return geom
+    g = geom if geom.is_valid else make_valid(geom)
+    parts = _polygons_of(g)
+    if parts:
+        g = unary_union(parts)
+    if g is not None and not g.is_empty and not g.is_valid:
+        g = g.buffer(0)
+    return g
 
 
 def _polygons_of(geom):
@@ -128,7 +154,12 @@ SEAM_STEP_M = 15.0     # sampling step along the shared frontage
 
 
 RAIL_TOL_M = 5.0          # leave a village alone if its railway land is already this close to the norm
-RAIL_MAX_WIDTH_M = 45.0   # wider than this and the survey is not the railway strip, only crossed by it
+RAIL_MAX_WIDTH_M = 45.0   # a plain strip this wide or less is railway land on its width alone
+RAIL_WIDE_MAX_M = 85.0    # a wider one counts only if its own sheet draws the track through it
+# Peramanur 77 is 57 m wide and 76 is 48 m: station land, wider than a running corridor. The width
+# rule alone threw them out and left 77 sixteen metres off the track, which is what Akash saw on
+# 2026-09-22. Their sheets draw the track (211 m and 199 m of it), so the sheet decides instead.
+# Survey 43 stays out: 610 m across and no track drawn on its sheet at all.
 
 # Why a tolerance at all: the norm is +3.0 m, but the three villages where Akash's placements give
 # the truth sit at +1.7, +3.0 and +6.1 m. The norm is therefore only good to about +-2.5 m, and
@@ -257,11 +288,47 @@ def rail_strips(gdf, village, line):
         if len(o) < RAIL_MIN_SAMPLES:
             continue
         lo, hi = float(np.percentile(o, 5)), float(np.percentile(o, 95))
-        if hi - lo > RAIL_MAX_WIDTH_M:
-            continue
-        out.append({"index": i, "survey": str(row["survey_no"]), "centre": (lo + hi) / 2.0,
-                    "width": hi - lo, "at": np.array(g.centroid.coords[0])})
+        width = hi - lo
+        centre, source = (lo + hi) / 2.0, "strip centre"
+        if width > RAIL_MAX_WIDTH_M:
+            if width > RAIL_WIDE_MAX_M:
+                continue
+            # too wide for its centre to mean anything: ask the sheet where the track runs
+            drawn = _drawn_track_offset(village, str(row["survey_no"]), g, line)
+            if drawn is None:
+                continue
+            centre, source = drawn, "track drawn on the sheet"
+        out.append({"index": i, "survey": str(row["survey_no"]), "centre": centre,
+                    "width": width, "source": source, "at": np.array(g.centroid.coords[0])})
     return out
+
+
+def _drawn_track_offset(village, survey, placed, line, samples=21):
+    """How far the track this parcel's own sheet draws lies from the real track, in metres."""
+    from shapely import affinity
+    from shapely.geometry import Point
+    t, poly = sheet_track(village, survey)
+    if t is None or poly is None or placed is None or placed.is_empty:
+        return None
+    ang, shift, iou = rigid_fit(poly, placed)
+    if iou < 0.2:
+        return None
+    tw = affinity.rotate(affinity.translate(t, shift[0], shift[1]), ang,
+                         origin=Point(*placed.centroid.coords[0]))
+    off = []
+    for k in range(samples):
+        q = tw.interpolate(k / (samples - 1.0), normalized=True)
+        sdist = line.project(q)
+        r = line.interpolate(sdist)
+        t0 = line.interpolate(max(0.0, sdist - 15.0))
+        t1 = line.interpolate(min(line.length, sdist + 15.0))
+        d = np.array([t1.x - t0.x, t1.y - t0.y])
+        n = np.linalg.norm(d)
+        if n < 1e-9:
+            continue
+        d /= n
+        off.append(float((np.array([q.x, q.y]) - np.array([r.x, r.y])) @ np.array([-d[1], d[0]])))
+    return float(np.median(off)) if off else None
 
 
 def track_offsets(gdf, village, line, min_iou=0.45, samples=21):
@@ -336,6 +403,64 @@ PARCEL_RAIL_MAX_M = 18.0    # beyond this it is not a placement error but a diff
 PARCEL_RAIL_WIDTH = (15.0, 36.0)
 
 
+def place_rail_parcels_on_track(gdf, village, line, target_centre, tol=3.0, cap=30.0):
+    """Move each railway parcel bodily onto the track. Returns (gdf, notes).
+
+    The smooth field cannot do this where a village's rail parcels disagree with each other:
+    Peramanur's sit 28 m apart across the track, so correcting one drags its neighbours off. Each
+    is therefore translated on its own, across the track only, and the overlaps that creates
+    between it and its neighbours are settled afterwards. Shapes are not touched.
+    """
+    from shapely import affinity
+    from shapely.geometry import Point
+    moved = []
+    geoms = list(gdf.geometry)
+    for st in rail_strips(gdf, village, line):
+        off = st["centre"] - target_centre
+        if abs(off) < tol or abs(off) > cap:
+            continue
+        sdist = line.project(Point(st["at"]))
+        t0 = line.interpolate(max(0.0, sdist - 15.0))
+        t1 = line.interpolate(min(line.length, sdist + 15.0))
+        d = np.array([t1.x - t0.x, t1.y - t0.y])
+        n = np.linalg.norm(d)
+        if n < 1e-9:
+            continue
+        d /= n
+        shift = np.array([-d[1], d[0]]) * (-off)
+        i = st["index"]
+        pos = list(gdf.index).index(i)
+        g = _valid(geoms[pos])
+        if g is None:
+            continue
+        geoms[pos] = affinity.translate(g, float(shift[0]), float(shift[1]))
+        moved.append((st["survey"], round(float(off), 1), st["source"]))
+    if not moved:
+        return gdf, []
+    out = gdf.copy()
+    out["geometry"] = geoms
+    # a parcel put on the track on evidence outranks the neighbour it now lies on, so the
+    # neighbour yields whatever it takes; the usual quarter-parcel guard would refuse 52 % and
+    # leave the overlap standing
+    placed = {s for s, _o, _src in moved}
+    keep = [_valid(g) for g in out.geometry]
+    for i, (idx_i, row) in enumerate(out.iterrows()):
+        if str(row["survey_no"]) not in placed or keep[i] is None:
+            continue
+        for j, other in enumerate(keep):
+            if j == i or other is None or str(out.iloc[j]["survey_no"]) in placed:
+                continue
+            inter = keep[i].intersection(other)
+            if inter.is_empty or inter.area <= CLIP_MIN_M2:
+                continue
+            cut = _valid(other.difference(keep[i]))
+            if cut is not None and not cut.is_empty:
+                keep[j] = cut
+    out["geometry"] = keep
+    out, _fixed = clip_siblings(out)
+    return out, moved
+
+
 def rail_control_per_parcel(gdf, village, line, target_centre,
                             tol=PARCEL_RAIL_TOL_M, cap=PARCEL_RAIL_MAX_M):
     """Control for the individual strips still sitting off the track after the village is aligned.
@@ -354,7 +479,8 @@ def rail_control_per_parcel(gdf, village, line, target_centre,
         off = st["centre"] - target_centre
         if abs(off) < tol or abs(off) > cap:
             continue
-        if not (PARCEL_RAIL_WIDTH[0] <= st["width"] <= PARCEL_RAIL_WIDTH[1]):
+        if st.get("source") != "track drawn on the sheet" and not (
+                PARCEL_RAIL_WIDTH[0] <= st["width"] <= PARCEL_RAIL_WIDTH[1]):
             continue
         sdist = line.project(Point(st["at"]))
         t0 = line.interpolate(max(0.0, sdist - 15.0))
@@ -924,15 +1050,37 @@ def main(argv=None):
                     layers[v] = gdf
                     log.info("%s: railway land settled %+.1f m after the village seams were clipped",
                              v, -off3)
+                # and the individual strips the village median cannot reach. These are moved
+                # bodily: a field smooth enough to keep the fabric would drag their neighbours off
+                # the track with them.
+                for _round in range(PARCEL_RAIL_ROUNDS):
+                    gdf, moved = place_rail_parcels_on_track(gdf, v, line3, rail_target)
+                    if not moved:
+                        break
+                    layers[v] = gdf
+                    log.info("%s: %d rail parcel(s) moved onto the track: %s", v, len(moved), moved[:5])
 
-        # settling the track re-opens a little of what was just clipped, so settle the claims again
+        # moving a rail parcel bodily leaves it lying on its neighbours, so the claims inside each
+        # village and between villages are settled again, and anything the differences broke is
+        # repaired before it is written
+        for v, gdf in layers.items():
+            gdf, _n = clip_siblings(gdf)
+            gdf = gdf.copy()
+            gdf["geometry"] = [_repair(_valid(g)) if g is not None else g for g in gdf.geometry]
+            layers[v] = gdf
         layers, notes2 = clip_village_overlaps(layers, has_control)
         for n in notes2:
             log.info("village seam, second pass: %s", n)
 
         for v, gdf in layers.items():
-            gdf.to_crs(4326).to_file(work_dir / ("%s_puvi_shifted.geojson" % v),
-                                     driver="GeoJSON", COORDINATE_PRECISION=8)
+            out_g = gdf.to_crs(4326)
+            # a parcel valid in metres can come back self-intersecting once written as degrees,
+            # so it is snapped to a millimetre grid and repaired in the CRS it is written in
+            out_g["geometry"] = [_snap_or_keep(g) for g in out_g.geometry]
+            out_g["geometry"] = [g if g is None or g.is_valid else _repair(g.buffer(0))
+                                 for g in out_g.geometry]
+            out_g.to_file(work_dir / ("%s_puvi_shifted.geojson" % v),
+                          driver="GeoJSON", COORDINATE_PRECISION=8)
 
     rows = sorted(rows, key=lambda r: order.index(r["village_code"]))
     if args.buffer_layer:
