@@ -41,6 +41,38 @@ Two things follow. The sheet and the Puvi parcel agree on shape closely enough t
 ambiguity. And the placed parcel inherits the base's position exactly: this stage cannot be more
 accurate than the base, and it is not less.
 
+### Stage 1b: where the shapes disagree, the base shape stands
+
+Akash's rule, 2026-09-22: try the shape match first; where a parcel's shape would have to change to
+fit, do not force it. The base parcel's shape is then taken as fixed and delivered, and the sheet is
+recorded as disagreeing rather than placed on top of it.
+
+The test is the same one that flags a parcel: a shape match under 0.6, or an area ratio outside 0.8
+to 1.25. Those parcels carry `geometry_source = puvi base` in the output; everything else carries
+`geometry_source = fmb sheet`. Nothing is silently reshaped either way.
+
+### Stage 1c: ground control points from the base layer
+
+Control points come from the base layer itself, as instructed: its corners, where its outline really
+turns by 20 degrees or more, paired with the matching corner of the placed sheet within 5 m.
+
+Measured on the placed sheets:
+
+| Village | parcels | corners on the sheet | corners on the base | paired | residual | parcels with 3 or more pairs |
+|---|---|---|---|---|---|---|
+| Thirukatchur | 66 | 4 | 4 | 2 | 2.7 m | 31 of 66 |
+| Oorapakkam | 64 | 4 | 4 | 3 | 2.6 m | 33 of 64 |
+| Kizhikaranai | 15 | 3 | 4 | 2 | 2.9 m | 1 of 15 |
+
+Read that honestly: the residual is the base's own accuracy, so these points do not make the
+placement better than the base. What they give is a placement you can open in the QGIS Georeferencer
+and drag, in the format the tool already writes (`<survey>_parcels.geojson.points`). About half the
+parcels get three or more pairs; the rest get the pairs that exist and the count is recorded, so a
+parcel resting on one point is never mistaken for a fitted one.
+
+Where a parcel has no usable pair, the sheet keeps the pose from stage 1 and is marked
+`gcp_points = 0`.
+
 ### Stage 2: make neighbours agree
 
 Sheets placed one at a time do not meet. Measured after stage 1:
@@ -75,9 +107,10 @@ Every parcel carries what it rests on, as the fine-tuned layer does now:
 
 - `evidence`: `hand placed` for your 53, `measured` where the base is within 150 m of one of your
   placements, `not evidenced` otherwise.
-- `shape_match` and `area_ratio` from stage 1, and `flag` where the match is under 0.6 or the area
-  ratio is outside 0.8 to 1.25. Those are the parcels where the sheet and Puvi describe different
-  ground, and they are for your eye, not for the machine to resolve.
+- `shape_match` and `area_ratio` from stage 1, `geometry_source` (`fmb sheet` or `puvi base`), and
+  `gcp_points`, how many control points the placement rests on. A parcel whose sheet and base
+  describe different ground keeps the base shape and comes to you, rather than being resolved by
+  the machine.
 - `moved_m`, how far stage 2 moved it after stage 1.
 
 Scoring is the existing `shift_score` against your 53 placements, reported before and after each
@@ -93,7 +126,8 @@ In `D:\Projects\Tambaram_Chengalpattu\FMB_on_Puvi_<date>\`:
 | `FMB_parcels_georeferenced.geojson` | the deliverable: every placed FMB parcel, one row per plot |
 | `FMB_parcels_by_survey.geojson` | the same dissolved to one row per survey, for comparison with Puvi |
 | `Puvi_Vector_Finetunned.geojson` | the base, copied in unchanged, so the pair travels together |
-| `placement_report.csv` | one row per survey: shape match, area ratio, moves, flags, evidence |
+| `placement_report.csv` | one row per survey: shape match, area ratio, geometry source, GCP count, moves, flags, evidence |
+| `gcp\<survey>_parcels.geojson.points` | the control points, in QGIS Georeferencer format, for you to drag |
 | `unplaced.csv` | the 39 with no sheet, and any parcel the run refused, with the reason |
 
 ## 5. What could go wrong, and what we do about it
