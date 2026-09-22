@@ -24,7 +24,7 @@ from shapely.geometry import MultiPolygon, Polygon
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
-from . import paths, shiftfit
+from . import engine, paths, shiftfit
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +125,94 @@ MEASURED_REACH_M = 150.0  # beyond this from a control parcel the correction is 
 
 SEAM_REACH_M = 120.0   # how far across a village boundary to look for the neighbour's edge
 SEAM_STEP_M = 15.0     # sampling step along the shared frontage
+
+
+RAIL_MAX_WIDTH_M = 45.0   # wider than this and the survey is not the railway strip, only crossed by it
+RAIL_MIN_SAMPLES = 8
+
+
+def _rail_line():
+    import shapely.ops as _ops
+    g = gpd.read_file(paths.RAIL_GPKG, layer="rail_line").to_crs(UTM).geometry.iloc[0]
+    return _ops.linemerge(g) if g.geom_type == "MultiLineString" else g
+
+
+def across_track(geom, line, step=8.0):
+    """Signed distances from the track to a parcel's outline: negative left, positive right."""
+    from shapely.geometry import Point
+    out = []
+    for g in _polygons_of(geom):
+        c = np.array(g.exterior.coords)
+        for i in range(len(c) - 1):
+            a, b = np.array(c[i][:2], float), np.array(c[i + 1][:2], float)
+            L = float(np.hypot(*(b - a)))
+            for k in range(max(1, int(L / step))):
+                pt = a + (b - a) * k / max(1, int(L / step))
+                sdist = line.project(Point(pt))
+                q = line.interpolate(sdist)
+                t0 = line.interpolate(max(0.0, sdist - 15.0))
+                t1 = line.interpolate(min(line.length, sdist + 15.0))
+                d = np.array([t1.x - t0.x, t1.y - t0.y])
+                n = np.linalg.norm(d)
+                if n < 1e-9:
+                    continue
+                d /= n
+                out.append(float((pt - np.array([q.x, q.y])) @ np.array([-d[1], d[0]])))
+    return np.array(out)
+
+
+def rail_strips(gdf, village, line):
+    """The parcels that ARE the railway land here, with where each sits across the track.
+
+    A survey counts only if it carries at least 50 m of the traced centreline (the rule the engine
+    already uses) and is no wider than RAIL_MAX_WIDTH_M across the track. Without the width test a
+    240 m block merely crossed by the line is counted and the measurement is meaningless.
+    """
+    known = engine._rail_parcels(village)
+    out = []
+    for i, row in gdf.iterrows():
+        if str(row["survey_no"]) not in known:
+            continue
+        g = _valid(row.geometry)
+        if g is None or g.distance(line) > 5.0:
+            continue
+        o = across_track(g, line)
+        if len(o) < RAIL_MIN_SAMPLES:
+            continue
+        lo, hi = float(np.percentile(o, 5)), float(np.percentile(o, 95))
+        if hi - lo > RAIL_MAX_WIDTH_M:
+            continue
+        out.append({"index": i, "survey": str(row["survey_no"]), "centre": (lo + hi) / 2.0,
+                    "width": hi - lo, "at": np.array(g.centroid.coords[0])})
+    return out
+
+
+def rail_control(gdf, village, line, target_centre):
+    """Control that puts this village's railway land back across the track where it belongs.
+
+    Only the across-track direction is used. Along the track a strip slides invisibly, so nothing
+    can be said about it and nothing is claimed. Measured on 2026-09-22: villages anchored by the
+    team's placements sit within a few metres of the corridor norm, while a village corrected only
+    by its seams can be 10 to 21 m off (Peramanur).
+    """
+    from shapely.geometry import Point
+    strips = rail_strips(gdf, village, line)
+    if not strips:
+        return np.zeros((0, 2)), np.zeros((0, 2)), None
+    off = float(np.median([s["centre"] for s in strips])) - target_centre
+    P, D = [], []
+    for s in strips:
+        sdist = line.project(Point(s["at"]))
+        t0 = line.interpolate(max(0.0, sdist - 15.0))
+        t1 = line.interpolate(min(line.length, sdist + 15.0))
+        d = np.array([t1.x - t0.x, t1.y - t0.y])
+        n = np.linalg.norm(d)
+        if n < 1e-9:
+            continue
+        d /= n
+        P.append(s["at"])
+        D.append(np.array([-d[1], d[0]]) * (-off))
+    return np.array(P), np.array(D), off
 
 
 def seam_control(target, fixed, reach=SEAM_REACH_M, step=SEAM_STEP_M, share=1.0):
@@ -317,7 +405,8 @@ def village_name(village, puvi):
     return village
 
 
-def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None, seams=()):
+def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None, seams=(),
+                rail_target=None):
     """Write the corrected polygons for one village. Returns the report row.
 
     `seams` is a list of (neighbour geometry, share) already placed, used only when the village has
@@ -358,9 +447,34 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
     cdisp = np.array(cdisp) if cdisp else np.zeros((0, 2))
 
     acc = shiftfit.accuracy(cpoints, cdisp)
-    hand_points = cpoints.copy()          # before any seam point joins the control
+    hand_points = cpoints.copy()          # before any seam or rail point joins the control
     seam_note = ""
-    if len(cpoints) == 0 and seams:
+    rail_note = ""
+    # Stage one: railway land. A handful of rail strips cannot outvote hundreds of seam points in
+    # one fit (the first run moved them 0.3 m of the 12 m needed), so the across-track correction is
+    # applied on its own first and the seams then adjust what is left.
+    if len(cpoints) == 0 and rail_target is not None:
+        # the railway land of this village should straddle the track the way it does everywhere
+        # else on the corridor. Only the across-track direction is claimed.
+        try:
+            rp, rd, off = rail_control(targets, village, _rail_line(), rail_target)
+        except Exception as exc:
+            rp, rd, off = np.zeros((0, 2)), np.zeros((0, 2)), None
+            log.warning("%s: rail alignment skipped (%s)", village, exc)
+        if len(rp):
+            rail_table = _warp_table(_nodes(list(targets.geometry)), rp, rd,
+                                     k=shiftfit.SEAM_K, smooth=shiftfit.SEAM_SMOOTH_M)
+            before = [_valid(g) for g in targets.geometry]
+            targets = targets.copy()
+            targets["geometry"] = [_warp_with(g, rail_table) for g in before]
+            moved = [float(np.linalg.norm(np.array(_valid(b).centroid.coords[0])
+                                          - np.array(_valid(a).centroid.coords[0])))
+                     for a, b in zip(before, targets.geometry) if _valid(a) is not None and _valid(b) is not None]
+            rail_note = "%d rail strips, %+.1f m across the track, parcels moved %.1f m" % (
+                len(rp), -off, float(np.median(moved)) if moved else 0.0)
+            log.info("%s: railway land aligned, %s", village, rail_note)
+
+    if len(hand_points) == 0 and seams:
         # no placement of ours anywhere in this village: the only thing known about it is that its
         # edge must meet the villages already corrected beside it
         body = unary_union(list(targets.geometry))
@@ -370,16 +484,23 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
             if len(a):
                 sp.append(a); sd.append(b)
         if sp:
-            cpoints = np.vstack(sp)
-            cdisp = np.vstack(sd)
-            seam_note = "%d seam points against %d corrected neighbour(s)" % (len(cpoints), len(sp))
+            # add to whatever control this village already has: the railway-land points must not be
+            # thrown away here, which is what happened on the first run and left the strips untouched
+            add_p, add_d = np.vstack(sp), np.vstack(sd)
+            cpoints = np.vstack([cpoints, add_p]) if len(cpoints) else add_p
+            cdisp = np.vstack([cdisp, add_d]) if len(cdisp) else add_d
+            seam_note = "%d seam points against %d corrected neighbour(s)" % (len(add_p), len(sp))
             log.info("%s: no control of our own, %s", village, seam_note)
 
     tpoints = np.array([g.centroid.coords[0] for g in targets.geometry])
-    fit_kw = ({"k": shiftfit.SEAM_K, "smooth": shiftfit.SEAM_SMOOTH_M} if seam_note else {})
+    fit_kw = ({"k": shiftfit.SEAM_K, "smooth": shiftfit.SEAM_SMOOTH_M} if (seam_note or rail_note) else {})
     shifts, method = shiftfit.fit(cpoints, cdisp, tpoints, **fit_kw)
-    if seam_note:
+    if seam_note and rail_note:
+        method = "railway land and seams"
+    elif seam_note:
         method = "seam to corrected neighbour"
+    elif rail_note:
+        method = "railway land"
 
     # every parcel is warped through the same field, including the ones the team has placed by
     # hand: mixing two sources of geometry in one layer is what draws a double line along every
@@ -429,7 +550,7 @@ def run_village(village, out_dir, buffer_only=True, extra_control=(), stamp=None
 
     return {"village_code": village, "village_name": village_name(village, puvi),
             "control": len(cpoints), "targets": len(out), "method": method,
-            "seam_note": seam_note,
+            "seam_note": "; ".join(x for x in (rail_note, seam_note) if x),
             "mean_shift_x_m": round(float(cdisp.mean(0)[0]), 2) if len(cdisp) else "",
             "mean_shift_y_m": round(float(cdisp.mean(0)[1]), 2) if len(cdisp) else "",
             "run_at": out["run_at"].iloc[0], **{k: v for k, v in acc.items() if k != "control"}}
@@ -446,6 +567,8 @@ def main(argv=None):
                     help="every survey of the village, not just the buffer")
     ap.add_argument("--control", action="append", default=[],
                     help="extra control file with a survey_no column (repeatable)")
+    ap.add_argument("--no-rail", action="store_true",
+                    help="do not align a village's railway land across the track")
     ap.add_argument("--no-seams", action="store_true",
                     help="do not pull a village with no control onto its corrected neighbours")
     ap.add_argument("--corridor", action="store_true",
@@ -479,8 +602,43 @@ def main(argv=None):
     work_dir = (out_dir / "_working") if args.buffer_layer else out_dir
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    rail_target = None
+
+    def corridor_norm():
+        """Where railway land sits across the track in the villages our placements anchor.
+
+        Measured on their corrected geometry, not on raw Puvi: the whole point is to bring the
+        other villages to where the anchored ones ended up.
+        """
+        if args.no_rail:
+            return None
+        try:
+            line = _rail_line()
+        except Exception as exc:
+            log.warning("rail alignment unavailable: %s", exc)
+            return None
+        seen = []
+        for v in order:
+            if not has_control[v]:
+                continue
+            f = work_dir / ("%s_puvi_shifted.geojson" % v)
+            if not f.exists():
+                continue
+            g = gpd.read_file(f).to_crs(UTM)
+            strips = rail_strips(g, v, line)
+            if strips:
+                seen.append(float(np.median([x["centre"] for x in strips])))
+        if not seen:
+            return None
+        t = float(np.median(seen))
+        log.info("railway land sits %+.2f m across the track where your placements anchor it "
+                 "(%d village(s)); villages without control are brought to that", t, len(seen))
+        return t
+
     rows, placed = [], {}
     for v in order:
+        if not has_control[v] and rail_target is None:
+            rail_target = corridor_norm()
         seams = []
         if not has_control[v] and not args.no_seams:
             body = unary_union(list(puvi_polygons(v).geometry))
@@ -488,7 +646,7 @@ def main(argv=None):
                 if body.distance(geom) <= SEAM_REACH_M:
                     seams.append((geom, 1.0 if has_control[other] else 0.5))
         row = run_village(v, work_dir, buffer_only=args.buffer_only,
-                          extra_control=args.control, stamp=stamp, seams=seams)
+                          extra_control=args.control, stamp=stamp, seams=seams, rail_target=rail_target)
         if row:
             rows.append(row)
             written = gpd.read_file(work_dir / ("%s_puvi_shifted.geojson" % v)).to_crs(UTM)
@@ -507,7 +665,7 @@ def main(argv=None):
             if not seams:
                 continue
             row = run_village(v, work_dir, buffer_only=args.buffer_only,
-                              extra_control=args.control, stamp=stamp, seams=seams)
+                              extra_control=args.control, stamp=stamp, seams=seams, rail_target=rail_target)
             if row:
                 rows = [r for r in rows if r["village_code"] != v] + [row]
                 written = gpd.read_file(work_dir / ("%s_puvi_shifted.geojson" % v)).to_crs(UTM)

@@ -264,3 +264,42 @@ def test_the_robust_step_leaves_agreeing_control_alone():
     points = np.array([[0.0, 0.0], [100.0, 0.0], [0.0, 100.0], [100.0, 100.0], [50.0, 50.0]])
     disp = np.repeat(np.array([[3.0, -7.0]]), 5, axis=0)
     assert np.allclose(shiftfit.idw(points, disp, np.array([50.0, 20.0])), [3.0, -7.0], atol=1e-6)
+
+
+def test_across_track_measures_a_strip_from_the_track_in_metres():
+    from shapely.geometry import LineString, Polygon
+    from autogeoref import shift_puvi
+    line = LineString([(0, 0), (0, 1000)])          # track running due north
+    strip = Polygon([(8, 100), (32, 100), (32, 400), (8, 400)])   # 24 m wide, 8 m clear of the track
+    off = shift_puvi.across_track(strip, line)
+    near, far = float(np.percentile(off, 95)), float(np.percentile(off, 5))
+    # the sign is right-handed about the direction of travel, so east of a northbound track is negative
+    assert abs(near - -8.0) < 1.0 and abs(far - -32.0) < 1.0
+    assert abs((near - far) - 24.0) < 1.0, "and the width is read straight off it"
+
+
+def test_a_wide_block_merely_crossed_by_the_line_is_not_railway_land():
+    from shapely.geometry import LineString, Polygon
+    from autogeoref import shift_puvi
+    line = LineString([(0, 0), (0, 1000)])
+    block = Polygon([(-120, 100), (120, 100), (120, 400), (-120, 400)])
+    off = shift_puvi.across_track(block, line)
+    width = float(np.percentile(off, 95)) - float(np.percentile(off, 5))
+    assert width > shift_puvi.RAIL_MAX_WIDTH_M, "240 m wide: crossed by the line, not the railway strip"
+
+
+def test_seam_control_is_added_to_the_control_already_there_not_substituted_for_it():
+    import inspect
+    from autogeoref import shift_puvi
+    src = inspect.getsource(shift_puvi.run_village)
+    assert "cpoints = np.vstack([cpoints, add_p]) if len(cpoints) else add_p" in src, (
+        "the railway-land control must survive the seam step")
+
+
+def test_railway_land_is_corrected_in_its_own_stage_before_the_seams():
+    import inspect
+    from autogeoref import shift_puvi
+    src = inspect.getsource(shift_puvi.run_village)
+    rail_at = src.index("rail_table = _warp_table")
+    seam_at = src.index("seam_control(body, neighbour")
+    assert rail_at < seam_at, "a few rail strips cannot outvote hundreds of seam points in one fit"
