@@ -142,8 +142,17 @@ def update_tracker(rows, workbook=None):
         new_strings.append(text)
         return len(values) + len(new_strings) - 1
 
+    # reuse the tool's columns when they exist: a second update must never add S, T, U
+    existing = {}
+    for m in re.finditer(r'<c r="([A-Z]+)1"[^>]*t="s"><v>(\d+)</v></c>', header):
+        idx = int(m.group(2))
+        if idx < len(values) and values[idx] in TRACKER_COLUMNS:
+            existing[values[idx]] = m.group(1)
     cols, cursor = {}, last_col
     for name in TRACKER_COLUMNS:
+        if name in existing:
+            cols[name] = existing[name]
+            continue
         cursor = _next_col(cursor)
         cols[name] = cursor
         sheet = sheet.replace(header, header.replace(
@@ -162,8 +171,12 @@ def update_tracker(rows, workbook=None):
                                           ("Auto run", r.get("run", ""))) if str(val))
         if not cells:
             continue
-        sheet = re.sub(r'(<row r="%d".*?)</row>' % rid, lambda m: m.group(1) + cells + "</row>",
-                       sheet, count=1, flags=re.S)
+        def _swap(m):
+            body = m.group(1)
+            for col in cols.values():           # an earlier value at the same cell gives way
+                body = re.sub(r'<c r="%s%d".*?</c>' % (col, rid), "", body, flags=re.S)
+            return body + cells + "</row>"
+        sheet = re.sub(r'(<row r="%d".*?)</row>' % rid, _swap, sheet, count=1, flags=re.S)
         changed += 1
     if not changed:
         return "no change"
