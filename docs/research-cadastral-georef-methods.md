@@ -10,10 +10,13 @@ mistake. Claims without a measured figure are marked unquantified.
 
 ## Verdict
 
-**Go.** The published record supports least-squares block adjustment of adjoining cadastral
-sheets with shared-boundary tie points as an established method, and no alternative core
-(affine or polynomial fits, rubber-sheeting, image-to-map feature matching, learned boundary
-extraction) reaches materially better accuracy in comparable conditions. Three conditions:
+**Go, read as "no evidence to change the core", not as "settled".** The published record
+supports least-squares block adjustment of adjoining cadastral sheets with shared-boundary tie
+points as an established method. No alternative core (affine or polynomial fits,
+rubber-sheeting, image-to-map feature matching, learned boundary extraction) has been shown to
+reach cadastral accuracy in comparable conditions; that is different from being shown not to,
+and the learned methods in particular were tested by nobody on line-drawing sheets like these.
+Three conditions:
 
 1. Every accuracy figure is reported as fit-to-reference with the accuracy-cap sentence.
    Already in PR 0.
@@ -90,9 +93,10 @@ replacing it, which is decision 6.
 
 ## What this changes for us
 
-- Nothing in the core. Rigid pose, shared-boundary observations and block adjustment against
-  hand-placed anchors is the closest published analogue (Technion lineage), applied in the one
-  regime nobody has measured: no surveyed control at all.
+- No evidence to change the core. Rigid pose, shared-boundary observations and block
+  adjustment against hand-placed anchors is the closest published analogue (Technion lineage),
+  applied in the one regime nobody has measured: no surveyed control at all. The question stays
+  open; the harness below is what would answer it.
 - Add a scale-free comparison arm to the harness, measurement only: for every placed parcel,
   also fit a similarity transform to the same observations and log the fitted scale and the
   residual change. If the scales cluster tightly around 1, the rigid assumption is confirmed on

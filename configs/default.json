@@ -15,5 +15,15 @@
   },
   "ml": {
     "confidence": "rule"
+  },
+  "transcription": {
+    "readers": [
+      "json:A",
+      "json:B"
+    ],
+    "render_dir": "",
+    "render_scale": 1.6,
+    "sample_size": 10,
+    "sample_seed": 0
   }
 }

@@ -484,6 +484,14 @@ def _place_one(village, survey, stamp, placed, bodies, anchor_map, index, pass_n
         if s_bad:
             row["notes"] = " | ".join(x for x in (row.get("notes"),
                                                    "%d printed side(s) contradicted" % s_bad) if x)
+        # Akash, 2026-09-23: the sheet's printed neighbours are checked BEFORE a placement is
+        # finalised. A pose the sheet itself argues against is refused, never delivered:
+        # 47B went 90 m up the rail strip with 9 contradictions and still reached review.
+        if row["contradictions"] >= 2 and row["contradictions"] > (s_ok or 0):
+            row["notes"] = " | ".join(x for x in (row.get("notes"),
+                                                   "refused: the printed neighbours disagree with every pose") if x)
+            return dict(row, colour="red", confidence=0,
+                        status="refused: printed neighbours disagree"), None
     row["notes"] = " | ".join(x for x in (row.get("notes"), why) if x)
     if pose is not None:
         row["method"] = "image" if (image_pose is not None and pose is image_pose) else "neighbour"
@@ -707,6 +715,9 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
             if row["survey"] in edited:
                 row["notes"] = " | ".join(x for x in (row.get("notes"), "topology: " + edited[row["survey"]]) if x)
                 row["fp_placed"] = anchors.fingerprint(paths.output_path(village, row["survey"]))
+                if "topology cut" in edited[row["survey"]] and row.get("colour") != "red":
+                    # a parcel the resolver had to carve was mis-placed; the carving is not a fix
+                    row["colour"], row["confidence"] = "red", 0
 
     for row in rows:
         if row.get("fp_placed"):
@@ -749,7 +760,20 @@ def write_topology(village, written, adjusted, anchor_bodies, order, rail=()):
     edited = {}
     for s in written:
         new_parts = resolved.get(s) or [(p, g, "") for p, g in rigid[s]]
-        notes = sorted({n for _p, _g, n in new_parts if n})
+        new_parts, guard_notes = topology.sanity(rigid[s], new_parts)
+        if any("came apart" in n or "topology cut" in n for n in guard_notes):
+            # plot-level conform tore the survey, or clipping carved it: try it as one body against
+            # what is settled (small moves only; a real mis-placement still overlaps and is refused)
+            settled_now = dict(anchor_bodies)
+            settled_now.update({o: unary_union([g for _p, g, _n in resolved[o]]) for o in order
+                                if o != s and o in resolved and order.index(o) < order.index(s)})
+            alt, why = topology.conform_as_body(s, rigid[s], settled_now, anchors=set(anchor_bodies),
+                                                anchor_tol=topology.ANCHOR_CONFORM_TOL * 1.25)
+            if alt is not None:
+                alt, alt_notes = topology.sanity(rigid[s], alt)
+                if not any("rigid-clipped" in n or "came apart" in n for n in alt_notes):
+                    new_parts, guard_notes = alt, [why] + alt_notes
+        notes = sorted({n for _p, _g, n in new_parts if n}) + guard_notes
         if s in report.get("conformed", {}):
             notes.append("conform max %.2f m" % report["conformed"][s]["max_move_m"])
         if not notes:

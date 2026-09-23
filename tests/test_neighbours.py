@@ -9,6 +9,8 @@ def test_normalise_strips_prefixes_and_slashes():
     assert neighbours.normalise("103/5A") == "103"
     assert neighbours.normalise("S.No 47B") == "47B"
     assert neighbours.normalise(" 170 ") == "170"
+    assert neighbours.normalise("569/C") == "569C", "a slash letter is the portal's subdivision suffix"
+    assert neighbours.normalise("569/2") == "569", "a slash number is a plot inside the survey"
     assert neighbours.normalise("V.No. 74 THIRUKACHUR") is None, "a village number is not a survey"
     assert neighbours.normalise("Railway") is None
 

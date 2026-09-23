@@ -62,7 +62,10 @@ def test_rows_round_trip_through_the_csv(tmp_path):
     p = evalrows.append_rows([row], tmp_path / "rows.csv")
     evalrows.append_rows([row], p)
     back = evalrows.load_rows(p)
-    assert len(back) == 2 and back[0]["survey"] == "7A" and back[0]["within_3m"] == "1"
+    assert len(back) == 1 and back[0]["survey"] == "7A" and back[0]["within_3m"] == "1", "same run_id twice is one row"
+    row2 = evalrows.row_from_status("V", "r2", "", "seed", ["48A"], STATUS, _ref(), cfg, SQ)
+    evalrows.append_rows([row2], p)
+    assert len(evalrows.load_rows(p)) == 2
     with p.open(encoding="utf-8") as fh:
         assert fh.readline().count("run_id") == 1, "one header only"
 

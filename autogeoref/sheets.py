@@ -16,9 +16,16 @@ def load_sheet(village, survey):
 
 
 def dissolve(polys):
-    """Largest single polygon of the union of a sheet's parts."""
+    """Largest single polygon of the union of a sheet's parts.
+
+    A sheet with a degenerate sliver unions to a GeometryCollection (Thirukatchur,
+    2026-09-23); the polygonal parts are what the outline is made of."""
     u = unary_union([p.buffer(0) for _props, p in polys])
-    return max(u.geoms, key=lambda q: q.area) if u.geom_type == "MultiPolygon" else u
+    if u.geom_type in ("MultiPolygon", "GeometryCollection"):
+        parts = [q for q in u.geoms if q.geom_type == "Polygon" and q.area > 0]
+        if parts:
+            return max(parts, key=lambda q: q.area)
+    return u
 
 
 def outline(polys):

@@ -95,3 +95,26 @@ def test_tracker_filter_reaches_the_new_columns(tmp_path):
     dim = re.search(r'<dimension ref="A1:([A-Z]+)\d+"/>', sheet).group(1)
     assert flt == dim, "the filter must cover every column, not just the team's"
     assert review._index(flt) == review._index("O") + len(review.TRACKER_COLUMNS)
+
+
+def test_a_second_tracker_update_reuses_the_auto_columns(tmp_path):
+    import shutil, zipfile, re
+    from autogeoref import paths, review
+    src = paths.TRACKER
+    if not src.exists():
+        return
+    wb = tmp_path / "tracker.xlsx"
+    shutil.copy2(src, wb)
+    rows = [{"village_code": "35_04_074", "survey": "53", "colour": "green",
+             "notes": "first", "run": "r1"}]
+    assert review.update_tracker(rows, workbook=wb) == "applied"
+    rows[0]["notes"] = "second"
+    assert review.update_tracker(rows, workbook=wb) == "applied"
+    sheet = zipfile.ZipFile(wb).read("xl/worksheets/sheet1.xml").decode("utf-8")
+    shared = zipfile.ZipFile(wb).read("xl/sharedStrings.xml").decode("utf-8")
+    values = [re.sub(r"<.*?>", "", v) for v in
+              re.findall(r"<si>(?:<t[^>]*>)?(.*?)(?:</t>)?</si>", shared, re.S)]
+    header = re.search(r'<row r="1".*?</row>', sheet, re.S).group(0)
+    names = [values[int(m.group(1))] for m in
+             re.finditer(r't="s"><v>(\d+)</v></c>', header)]
+    assert names.count("Auto colour") == 1, "no duplicate tool columns"

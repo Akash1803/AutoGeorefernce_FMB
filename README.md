@@ -29,6 +29,22 @@ works without it. Project data lives outside the repo under `D:\Projects\<corrid
 (`autogeoref/paths.py`). The portal fetch scripts read the session cookie from
 `FMB_JSESSIONID`.
 
+Sheet QC before placing (see [docs/sheet-qc.md](docs/sheet-qc.md)):
+
+```
+python -m autogeoref.georef_village 35_04_074 --sheet-qc
+```
+
+Neighbour transcription (PR 1, two readers) and the seed plan:
+
+```
+python -m autogeoref.georef_village 35_04_074 --render-sheets   # crops for the readers
+python -m autogeoref.georef_village 35_04_074 --transcribe      # merge A.json + B.json -> table, review CSV, report, seeds
+```
+
+See [docs/pr1-transcription.md](docs/pr1-transcription.md). Every run appends evaluation rows
+(`--no-rows` to skip).
+
 ## Tests
 
 ```

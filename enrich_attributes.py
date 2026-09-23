@@ -42,6 +42,7 @@ for gj in files:
         p = f["properties"]
         new = {k: loc[k] for k in LOC}
         new.update({k: p.get(k) for k in KEEP})
+        new.update({k: v for k, v in p.items() if k not in LOC and k not in KEEP})   # e.g. sheet_correction
         if single and not new["plot_no"]:
             # an unsubdivided survey: the one polygon IS the survey number
             new["plot_no"] = survey; new["label_source"] = "whole_survey_no_subdivision"
@@ -50,7 +51,7 @@ for gj in files:
     g["metadata"]["attributes_note"] = "Location attributes (district/taluk/village codes, giscode) added per feature by enrich_attributes.py"
     json.dump(g, open(gj, "w", encoding="utf-8"), indent=1)
     with open(gj.replace("_parcels.geojson", "_parcels.csv"), "w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=LOC + KEEP); w.writeheader()
+        w = csv.DictWriter(fh, fieldnames=LOC + KEEP, extrasaction="ignore"); w.writeheader()
         for f in sorted(g["features"], key=lambda f: (f["properties"]["plot_no"] or "zzz")): w.writerow(f["properties"])
     per_sketch.append({"sketch_id": loc["sketch_id"], "village": loc["village"], "village_code": code, "taluk": loc["taluk"], "survey_no": survey,
                        "polygons": len(g["features"]), "numbered": sum(1 for f in g["features"] if f["properties"]["plot_no"]),
@@ -59,7 +60,7 @@ for gj in files:
                        "max_node_shift_m": md.get("max_node_displacement_m"), "text_class": md.get("text_class"), "geojson": os.path.relpath(gj, D)})
 
 with open(os.path.join(OUT, "all_parcels_attributes.csv"), "w", newline="", encoding="utf-8") as fh:
-    w = csv.DictWriter(fh, fieldnames=LOC + KEEP); w.writeheader(); w.writerows(all_rows)
+    w = csv.DictWriter(fh, fieldnames=LOC + KEEP, extrasaction="ignore"); w.writeheader(); w.writerows(all_rows)
 try:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
