@@ -76,6 +76,8 @@ def manual_files(village, survey):
 
 
 def surveys_with_sheets(village):
-    """Survey ids that have a sheet GeoJSON, numerically sorted."""
-    out = [p.name[: -len("_parcels.geojson")] for p in vector_dir(village).glob("*_parcels.geojson")]
+    """Survey ids that have a sheet GeoJSON, numerically sorted. An empty file (a conversion
+    that drew nothing, like 52A on 2026-09-23) is not a sheet."""
+    out = [p.name[: -len("_parcels.geojson")] for p in vector_dir(village).glob("*_parcels.geojson")
+           if p.stat().st_size > 200]
     return sorted(out, key=survey_sort_key)
