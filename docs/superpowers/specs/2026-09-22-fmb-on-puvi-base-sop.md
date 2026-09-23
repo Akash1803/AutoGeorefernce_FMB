@@ -95,6 +95,15 @@ neighbour pairs.
 than merely closing the gaps. If it closes gaps but moves parcels away from your placements, it is
 recorded as a failure and stage 1 is delivered alone.
 
+**Gate result, measured 2026-09-23: FAILED. Stage 1 is delivered alone.** On 65 of your parcels
+(none held fixed, so nothing leaked), the adjustment made things worse: RMSE 5.83 to 6.31 m,
+median 2.70 to 3.56 m, 8 parcels better and 27 worse. Two retuned variants (tighter seam reach,
+tighter prior) failed the same way. The reason is structural, not a tuning miss: the fine-tuned
+base was built from a smooth displacement field, so neighbouring parcels carry nearly the same
+error and their seams cannot reveal it. What the seams do show is where the sheets draw different
+extents, and pulling on those drags well-placed parcels 2 to 3 m off your placements. The code and
+its gate stay in `autogeoref/fmb_stage2.py` as the record; run `--gate` to reproduce.
+
 ### Stage 3: topology
 
 The clip and fill already used on this corridor: overlaps clipped out of the yielding side, gaps
