@@ -126,6 +126,21 @@ Scoring is the existing `shift_score` against your 53 placements, reported befor
 stage, with the standing caveat that your own placements disagree with each other by 1 to 3 m, so
 nothing can be read finer than that.
 
+## 3b. Addendum, 2026-09-23: conform, not rigid (Akash's direction)
+
+Seeing the rigid placement, Akash redirected: "I want both layers should be fit", "u can adjust
+the fmb parcels shape, line to fit with base layer (No need to worry about the area, dimension)".
+So the deliverable geometry is now CONFORMED: every placed sheet is warped so its outline is its
+base parcel's outline (nearest-point correspondence, IDW field, every distinct vertex moved once
+so shared lines stay shared), then clipped and filled to tile the parcel exactly. Printed lengths
+no longer survive; shape_match and conform_max_m in the report say how much each sheet was bent.
+Disagreeing sheets conform too, behind the standing 3x area gate (569B is never stretched over
+the tank). Land two villages both claim is clipped from the village without his placements.
+His placements still pass through untouched, and where they disagree with the base the base is
+wrong there by definition. Result 2026-09-23: 7319 plots, 519 surveys with sheet subdivisions,
+79 on the base shape (39 have no sheet), 80 his; zero invalid geometries; cross-village claims
+down from 2251 to 47 m2 (guard-protected residue).
+
 ## 4. What comes out
 
 In `D:\Projects\Tambaram_Chengalpattu\FMB_on_Puvi_<date>\`:
