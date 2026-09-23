@@ -143,13 +143,13 @@ def pose_from_geometry(village, survey, gpkg_path):
         for k in common:
             other = by_id[k]
             if other.geom_type in ("MultiPolygon", "GeometryCollection"):
-        parts = [q for q in other.geoms if q.geom_type == "Polygon" and q.area > 0]
-        if not parts:
-            return None            # a file of degenerate slivers anchors nothing
-        other = max(parts, key=lambda q: q.area)
-    if other.geom_type != "Polygon":
-        return None
-    ring = other.exterior
+                parts = [q for q in other.geoms if q.geom_type == "Polygon" and q.area > 0]
+                if not parts:
+                    continue            # a degenerate sliver anchors nothing
+                other = max(parts, key=lambda q: q.area)
+            if other.geom_type != "Polygon":
+                continue
+            ring = other.exterior
             mv = np.array(list(ring.coords)[:-1], float)
             for v in list(sheet[k].exterior.coords)[:-1]:
                 w = fit.transform_points([v], theta, t)[0]
