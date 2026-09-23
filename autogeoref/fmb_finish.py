@@ -333,6 +333,36 @@ def finish_village(village, plots, report, rail=None):
     return plots, report, topo
 
 
+def _yield_reverse(keeper_plots, piece, keeper, topo_rows, other):
+    """When the yielder's guard refuses a cross-village piece, cut it from the keeper instead."""
+    by_survey = {}
+    for pl in keeper_plots:
+        by_survey.setdefault(str(pl["survey_no"]), []).append(pl)
+    done = False
+    for s, rows in sorted(by_survey.items()):
+        body_s = fmb_on_base._valid(unary_union([r["geometry"] for r in rows]))
+        if body_s is None:
+            continue
+        part = body_s.intersection(piece)
+        if part.is_empty or part.area <= 1.0:
+            continue
+        if body_s.area > 0 and part.area / body_s.area > topology.GUARD_FRACTION:
+            continue
+        new_body = fmb_on_base._valid(body_s.difference(piece))
+        if new_body is None or new_body.is_empty:
+            continue
+        parts = [(r, r["geometry"]) for r in rows]
+        for (r, _g), (_r2, ng, note) in zip(parts, topology.apply_to_parts(parts, new_body, body_s)):
+            r["geometry"] = ng
+            if note:
+                r["topo_note"] = (str(r.get("topo_note", "")) + "; " + note).strip("; ")
+        topo_rows.append({"village_code": keeper, "survey_no": s,
+                          "action": "cross-village clip", "against": other,
+                          "sqm": round(part.area, 1)})
+        done = True
+    return done
+
+
 def settle_cross_village(all_plots, topo_rows):
     """Clip the land two villages both claim, plot by plot; a village with Akash's own
     placements keeps its ground, otherwise the larger body yields. Guarded like every clip."""
@@ -371,9 +401,16 @@ def settle_cross_village(all_plots, topo_rows):
                 if piece.is_empty or piece.area <= 1.0:
                     continue
                 if body_s.area > 0 and piece.area / body_s.area > topology.GUARD_FRACTION:
+                    # the guard protects this parcel; the keeper's side can yield instead
+                    if _yield_reverse(by_village[keeper], piece, keeper, topo_rows, yielder):
+                        bodies[keeper] = fmb_on_base._valid(
+                            unary_union([pl["geometry"] for pl in by_village[keeper]]))
+                        keep_body = bodies[keeper]
+                        continue
                     topo_rows.append({"village_code": yielder, "survey_no": s,
                                       "action": "refused",
-                                      "against": "cross-village clip would take %.0f %%"
+                                      "against": "cross-village clip would take %.0f %% and "
+                                                 "the other side's guard also refused"
                                                  % (100 * piece.area / body_s.area),
                                       "sqm": round(piece.area, 1)})
                     continue
