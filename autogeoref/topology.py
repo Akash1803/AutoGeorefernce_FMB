@@ -96,8 +96,13 @@ def check(geoms):
             "union_parts": len(parts)}
 
 
-def fix(geoms, movable, rail, gap_tol=1.20):
-    """Clip overlaps and fill gaps between `movable` parcels. Returns (geoms, report)."""
+def fix(geoms, movable, rail, gap_tol=1.20, max_fill_m2=None):
+    """Clip overlaps and fill gaps between `movable` parcels. Returns (geoms, report).
+
+    `max_fill_m2` caps what counts as a gap: in a fabric that is only a corridor strip, the
+    union encloses real land whose parcels are simply not in the buffer, and without the cap
+    that land is "filled" into whichever parcel borders it most (569B took 10 ha, 2026-09-23).
+    """
     out = {k: g.buffer(0) for k, g in geoms.items()}
     report = {"clips": [], "fills": [], "refused": [], "rail_conflicts": []}
     keys = sorted(out, key=paths.survey_sort_key)
@@ -169,6 +174,8 @@ def fix(geoms, movable, rail, gap_tol=1.20):
                 continue
             candidates.append((piece, "gap between %s and %s" % (a, b)))
     for gap, kind in candidates:
+        if max_fill_m2 is not None and gap.area > max_fill_m2:
+            continue                      # not a sliver: land the buffer simply does not hold
         best, best_share = None, 0.0
         for key in movable:
             share = out[key].buffer(0.05).intersection(gap).area
