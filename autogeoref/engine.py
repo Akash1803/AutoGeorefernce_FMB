@@ -484,6 +484,14 @@ def _place_one(village, survey, stamp, placed, bodies, anchor_map, index, pass_n
         if s_bad:
             row["notes"] = " | ".join(x for x in (row.get("notes"),
                                                    "%d printed side(s) contradicted" % s_bad) if x)
+        # Akash, 2026-09-23: the sheet's printed neighbours are checked BEFORE a placement is
+        # finalised. A pose the sheet itself argues against is refused, never delivered:
+        # 47B went 90 m up the rail strip with 9 contradictions and still reached review.
+        if row["contradictions"] >= 2 and row["contradictions"] > (s_ok or 0):
+            row["notes"] = " | ".join(x for x in (row.get("notes"),
+                                                   "refused: the printed neighbours disagree with every pose") if x)
+            return dict(row, colour="red", confidence=0,
+                        status="refused: printed neighbours disagree"), None
     row["notes"] = " | ".join(x for x in (row.get("notes"), why) if x)
     if pose is not None:
         row["method"] = "image" if (image_pose is not None and pose is image_pose) else "neighbour"
