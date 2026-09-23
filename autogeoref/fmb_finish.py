@@ -31,6 +31,121 @@ log = logging.getLogger(__name__)
 UTM = 32644
 GAP_TOL_M = 1.20        # the corridor's own seam width: wider is a disagreement, not a sliver
 MAX_FILL_M2 = 25.0      # the SOP's cap: a bigger "gap" is land the buffer does not hold
+CONFORM_STEP_M = 3.0    # boundary correspondence sample spacing
+CONFORM_K = 8           # neighbours in the conform field
+CONFORM_SMOOTH_M = 5.0  # keeps the field smooth between correspondence points
+AREA_HARD = (1.0 / 3.0, 3.0)   # outside the 3x gate the sheet and the base are different ground
+
+
+def conform_survey(rows, base_geom):
+    """Warp one placed sheet so its outline IS its base parcel's outline, plots carried inside.
+
+    Akash, 2026-09-23: both layers should fit. The base outline is authoritative; the sheet
+    contributes the interior subdivision. Every distinct vertex moves once (the node table), so
+    shared plot lines stay one line; the exact fit at the end clips to the base parcel and gives
+    whatever remains of it to the plot bordering it most, so the union equals the base parcel.
+    Printed sheet lengths no longer survive exactly; the rigid pose is what preserved them, and
+    shape_match in the report still says how much the two drawings disagree.
+    Returns how far the outline had to move, in metres.
+    """
+    geoms = [fmb_on_base._valid(r["geometry"]) for r in rows]
+    body = fmb_on_base._valid(unary_union([g for g in geoms if g is not None]))
+    if body is None or body.is_empty:
+        return 0.0
+    bb = base_geom.boundary
+    pts, disp = [], []
+    for poly in shift_puvi._polygons_of(body):
+        ring = poly.exterior
+        n = max(8, int(ring.length / CONFORM_STEP_M))
+        for i in range(n):
+            s = ring.interpolate(i * ring.length / n)
+            q = bb.interpolate(bb.project(s))
+            pts.append((s.x, s.y))
+            disp.append((q.x - s.x, q.y - s.y))
+    pts, disp = np.asarray(pts), np.asarray(disp)
+    moved = float(np.linalg.norm(disp, axis=1).max()) if len(pts) else 0.0
+    table = shift_puvi._warp_table(shift_puvi._nodes([g for g in geoms if g is not None]),
+                                   pts, disp, k=CONFORM_K, smooth=CONFORM_SMOOTH_M)
+    for r, g in zip(rows, geoms):
+        if g is not None:
+            r["geometry"] = fmb_on_base._valid(shift_puvi._warp_with(g, table))
+    parts = [(r, r["geometry"]) for r in rows if r["geometry"] is not None]
+    new_body = fmb_on_base._valid(unary_union([g for _r, g in parts]))
+    if parts and new_body is not None and not new_body.is_empty:
+        for (r, _g), (_r2, ng, note) in zip(parts,
+                                            topology.apply_to_parts(parts, base_geom, new_body)):
+            r["geometry"] = ng
+            if note.startswith("kept"):
+                r["topo_note"] = note
+    return moved
+
+
+def _adopt_sheet(village, survey, base_geom, proto, rep):
+    """Bring a disagreeing sheet's plots in anyway, for conforming (Akash, 2026-09-23).
+
+    The shape gate stays only as the 3x area rule: a sheet describing wholly different ground
+    (569B's 0.98 acres against a 259 acre tank) is not stretched over it. Everything nearer than
+    that is placed and conformed; the flag keeps saying how much the drawings disagreed.
+    """
+    sheet_gdf, outline = fmb_on_base.sheet_of(village, survey)
+    if outline is None:
+        return None
+    pose = fmb_on_base.place(outline, base_geom)
+    if pose is None or not (AREA_HARD[0] <= pose["area_ratio"] <= AREA_HARD[1]):
+        return None
+    new = []
+    for _i, srow in sheet_gdf.iterrows():
+        g = fmb_on_base.apply_pose(fmb_on_base._valid(srow.geometry), pose, base_geom)
+        if g is None or g.is_empty:
+            continue
+        r = {k: proto[k] for k in ("village_code", "village", "survey_no", "evidence", "run_at")
+             if k in proto}
+        r.update({"geometry_source": "fmb sheet", "plot_no": str(srow.get("plot_no", "")),
+                  "shape_match": round(pose["match"], 3),
+                  "area_ratio": round(pose["area_ratio"], 3), "gcp_points": 0, "geometry": g})
+        new.append(r)
+    if not new:
+        return None
+    if rep is not None:
+        rep["geometry_source"] = "fmb sheet"
+        rep["plots_expected"] = len(sheet_gdf)
+        rep["plots_kept"] = len(new)
+        rep["flag"] = (str(rep.get("flag", "")) + "; conformed despite the disagreement").strip("; ")
+    return new
+
+
+def conform_village(village, plots, report, base_sub):
+    """Conform every survey with a sheet to its base parcel. Returns (plots, {survey: m})."""
+    base_of = {}
+    for _, row in base_sub.iterrows():
+        g = fmb_on_base._valid(row.geometry)
+        if g is not None:
+            base_of.setdefault(str(row["survey_no"]), []).append(g)
+    by_survey = {}
+    for p in plots:
+        by_survey.setdefault(str(p["survey_no"]), []).append(p)
+    rep_of = {str(r["survey_no"]): r for r in report}
+    out_plots, stats = [], {}
+    for s, rows in sorted(by_survey.items()):
+        src = rows[0].get("geometry_source")
+        blist = base_of.get(s)
+        base_geom = fmb_on_base._valid(unary_union(blist)) if blist else None
+        if base_geom is None or base_geom.is_empty or src == "your placement":
+            out_plots += rows
+            continue
+        if src == "puvi base":
+            adopted = _adopt_sheet(village, s, base_geom, rows[0], rep_of.get(s))
+            if adopted is None:
+                out_plots += rows          # no sheet, or truly different ground: the base stands
+                continue
+            rows = adopted
+        stats[s] = round(conform_survey(rows, base_geom), 2)
+        out_plots += rows
+    for r in report:
+        r["conform_max_m"] = stats.get(str(r["survey_no"]), "")
+    for p in out_plots:
+        p["conform_max_m"] = stats.get(str(p["survey_no"]), "")
+    return out_plots, stats
 
 
 def finish_village(village, plots, report, rail=None):
@@ -75,6 +190,67 @@ def finish_village(village, plots, report, rail=None):
     return plots, report, topo
 
 
+def settle_cross_village(all_plots, topo_rows):
+    """Clip the land two villages both claim, plot by plot; a village with Akash's own
+    placements keeps its ground, otherwise the larger body yields. Guarded like every clip."""
+    by_village, hand_villages = {}, set()
+    for pl in all_plots:
+        v = str(pl["village_code"])
+        by_village.setdefault(v, []).append(pl)
+        if pl.get("geometry_source") == "your placement":
+            hand_villages.add(v)
+    bodies = {v: fmb_on_base._valid(unary_union([pl["geometry"] for pl in rows]))
+              for v, rows in by_village.items()}
+    for a in sorted(by_village):
+        for b in sorted(by_village):
+            if b <= a or bodies[a] is None or bodies[b] is None:
+                continue
+            inter = bodies[a].intersection(bodies[b])
+            if inter.is_empty or inter.area <= 1.0:
+                continue
+            if a in hand_villages and b not in hand_villages:
+                yielder, keeper = b, a
+            elif b in hand_villages and a not in hand_villages:
+                yielder, keeper = a, b
+            else:
+                yielder, keeper = (a, b) if bodies[a].area >= bodies[b].area else (b, a)
+            keep_body = bodies[keeper]
+            by_survey = {}
+            for pl in by_village[yielder]:
+                by_survey.setdefault(str(pl["survey_no"]), []).append(pl)
+            for s, rows in sorted(by_survey.items()):
+                if rows[0].get("geometry_source") == "your placement":
+                    continue
+                body_s = fmb_on_base._valid(unary_union([r["geometry"] for r in rows]))
+                if body_s is None:
+                    continue
+                piece = body_s.intersection(keep_body)
+                if piece.is_empty or piece.area <= 1.0:
+                    continue
+                if body_s.area > 0 and piece.area / body_s.area > topology.GUARD_FRACTION:
+                    topo_rows.append({"village_code": yielder, "survey_no": s,
+                                      "action": "refused",
+                                      "against": "cross-village clip would take %.0f %%"
+                                                 % (100 * piece.area / body_s.area),
+                                      "sqm": round(piece.area, 1)})
+                    continue
+                new_body = fmb_on_base._valid(body_s.difference(keep_body))
+                if new_body is None or new_body.is_empty:
+                    continue
+                parts = [(r, r["geometry"]) for r in rows]
+                for (r, _g), (_r2, ng, note) in zip(parts,
+                                                    topology.apply_to_parts(parts, new_body, body_s)):
+                    r["geometry"] = ng
+                    if note:
+                        r["topo_note"] = (str(r.get("topo_note", "")) + "; " + note).strip("; ")
+                topo_rows.append({"village_code": yielder, "survey_no": s,
+                                  "action": "cross-village clip", "against": keeper,
+                                  "sqm": round(piece.area, 1)})
+            bodies[yielder] = fmb_on_base._valid(
+                unary_union([pl["geometry"] for pl in by_village[yielder]]))
+    return all_plots
+
+
 def cross_village_overlap(plots):
     """How much land two villages' placed sheets both claim, in m2 per village pair."""
     bodies = {}
@@ -92,14 +268,18 @@ def cross_village_overlap(plots):
 
 
 def _write_safe(geom):
-    """Valid in the written CRS, not only in metres: snap, then repair what remains."""
-    g = shift_puvi._snap_or_keep(geom)
+    """Valid in the written CRS, not only in metres: snap, then repair what remains.
+
+    The snap grid matches COORDINATE_PRECISION=8: snapping finer than the writer rounds
+    left 4 dissolved surveys invalid on 2026-09-23.
+    """
+    g = shift_puvi._snap_or_keep(geom, grid=1e-8)
     if g is not None and not g.is_empty and not g.is_valid:
         g = g.buffer(0)
     return g
 
 
-REPORT_COLUMNS = fmb_on_base.REPORT_COLUMNS + ["topo_note"]
+REPORT_COLUMNS = fmb_on_base.REPORT_COLUMNS + ["topo_note", "conform_max_m"]
 
 
 def main(argv=None):
@@ -131,6 +311,10 @@ def main(argv=None):
         hand = {k: fmb_on_base._valid(g)
                 for k, g in shift_puvi.control_parcels(v, args.control).items()}
         plots, report, unplaced = fmb_on_base.run_village(v, sub, out_dir, hand=hand, stamp=stamp)
+        plots, stats = conform_village(v, plots, report, sub)
+        if stats:
+            log.info("%s: %d survey(s) conformed to the base outline, median %.2f m, max %.2f m",
+                     v, len(stats), float(np.median(list(stats.values()))), max(stats.values()))
         plots, report, topo = finish_village(v, plots, report)
         all_plots += plots
         all_report += report
@@ -154,9 +338,10 @@ def main(argv=None):
     if not all_plots:
         log.error("nothing placed")
         return 1
+    settle_cross_village(all_plots, topo_rows)
     across = cross_village_overlap(all_plots)
     for (a, b), area in sorted(across.items()):
-        log.info("village overlap %s / %s: %.1f m2 (left as drawn; the base owns the boundary)", a, b, area)
+        log.info("village overlap %s / %s: %.1f m2 still standing after the settle", a, b, area)
 
     g = gpd.GeoDataFrame(all_plots, geometry="geometry", crs=UTM)
     g["area_sqm"] = g.geometry.area.round(1)

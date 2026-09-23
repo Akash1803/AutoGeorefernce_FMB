@@ -74,3 +74,78 @@ def test_land_the_buffer_does_not_hold_is_not_filled():
     assert not topo["fills"], "a 100 m2 enclosure is left alone"
     total = sum(p["geometry"].area for p in plots)
     assert abs(total - 800.0) < 1.0
+
+
+def test_a_conformed_survey_fits_its_base_parcel_exactly():
+    # the sheet draws the survey 2 m narrower than the base parcel
+    base = sq(0, 0, 30, 30)
+    rows = [{"survey_no": "1", "geometry_source": "fmb sheet", "plot_no": "1",
+             "geometry": sq(0, 0, 14, 30)},
+            {"survey_no": "1", "geometry_source": "fmb sheet", "plot_no": "2",
+             "geometry": sq(14, 0, 14, 30)}]
+    moved = fmb_finish.conform_survey(rows, base)
+    from shapely.ops import unary_union
+    body = unary_union([r["geometry"] for r in rows])
+    assert body.symmetric_difference(base).area < 0.5, "the outline IS the base outline"
+    assert rows[0]["geometry"].intersection(rows[1]["geometry"]).area < 0.1, "one shared line, no overlap"
+    assert 1.5 < moved < 4.0
+
+
+def test_conform_leaves_his_placements_and_disagreeing_parcels_alone():
+    import geopandas as gpd
+    hand, disagreeing = sq(0, 0), sq(40, 0)
+    plots = [{"survey_no": "1", "geometry_source": "your placement", "geometry": hand},
+             {"survey_no": "2", "geometry_source": "puvi base", "geometry": disagreeing}]
+    report = [{"survey_no": "1", "geometry_source": "your placement"},
+              {"survey_no": "2", "geometry_source": "puvi base"}]
+    base_sub = gpd.GeoDataFrame({"survey_no": ["1", "2"]},
+                                geometry=[sq(2, 0), sq(41, 0)], crs=32644)
+    plots, _stats = fmb_finish.conform_village("nowhere", plots, report, base_sub)
+    assert plots[0]["geometry"].equals(hand)
+    assert plots[1]["geometry"].equals(disagreeing)
+
+
+def test_a_disagreeing_sheet_is_still_conformed_onto_the_same_ground(monkeypatch):
+    import geopandas as gpd
+    from shapely.ops import unary_union
+    base = sq(0, 0, 30, 30)
+    # the sheet draws the survey 22 x 28: a real disagreement, but the same ground (within 3x)
+    sheet = gpd.GeoDataFrame({"plot_no": ["1", "2"]},
+                             geometry=[sq(100, 50, 10, 28), sq(110, 50, 12, 28)])
+    outline = unary_union(list(sheet.geometry))
+    monkeypatch.setattr(fmb_finish.fmb_on_base, "sheet_of", lambda v, s: (sheet, outline))
+    plots = [{"survey_no": "9", "geometry_source": "puvi base", "village_code": "v",
+              "geometry": base}]
+    report = [{"survey_no": "9", "geometry_source": "puvi base", "flag": "shape match 0.55"}]
+    base_sub = gpd.GeoDataFrame({"survey_no": ["9"]}, geometry=[base], crs=32644)
+    plots, stats = fmb_finish.conform_village("v", plots, report, base_sub)
+    assert len(plots) == 2 and all(p["geometry_source"] == "fmb sheet" for p in plots)
+    body = unary_union([p["geometry"] for p in plots])
+    assert body.symmetric_difference(base).area < 1.0, "it now tiles the base parcel exactly"
+    assert report[0]["flag"].endswith("conformed despite the disagreement")
+
+
+def test_ground_beyond_the_3x_gate_is_never_stretched(monkeypatch):
+    import geopandas as gpd
+    from shapely.ops import unary_union
+    base = sq(0, 0, 60, 60)                               # 3600 m2: the tank
+    sheet = gpd.GeoDataFrame({"plot_no": ["1"]}, geometry=[sq(100, 50, 20, 20)])   # 400 m2
+    monkeypatch.setattr(fmb_finish.fmb_on_base, "sheet_of",
+                        lambda v, s: (sheet, unary_union(list(sheet.geometry))))
+    plots = [{"survey_no": "569B", "geometry_source": "puvi base", "village_code": "v",
+              "geometry": base}]
+    report = [{"survey_no": "569B", "geometry_source": "puvi base", "flag": "area ratio 0.11"}]
+    base_sub = gpd.GeoDataFrame({"survey_no": ["569B"]}, geometry=[base], crs=32644)
+    plots, stats = fmb_finish.conform_village("v", plots, report, base_sub)
+    assert len(plots) == 1 and plots[0]["geometry"].equals(base)
+
+
+def test_land_two_villages_claim_is_settled_and_his_village_keeps_it():
+    from shapely.ops import unary_union
+    plots = [{"village_code": "A", "survey_no": "1", "geometry_source": "your placement",
+              "geometry": sq(0, 0)},
+             {"village_code": "B", "survey_no": "9", "geometry_source": "fmb sheet",
+              "geometry": sq(28, 0)}]
+    fmb_finish.settle_cross_village(plots, [])
+    assert plots[0]["geometry"].equals(sq(0, 0)), "the village with his placements keeps its ground"
+    assert plots[0]["geometry"].intersection(plots[1]["geometry"]).area < 0.1
