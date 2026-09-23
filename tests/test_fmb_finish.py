@@ -91,17 +91,20 @@ def test_a_conformed_survey_fits_its_base_parcel_exactly():
     assert 1.5 < moved < 4.0
 
 
-def test_conform_leaves_his_placements_and_disagreeing_parcels_alone():
+def test_even_his_placements_are_refitted_to_the_base():
+    # Akash, 2026-09-23: every parcel sits exactly on the base. With no sheet on disk his
+    # body takes the base parcel's shape; a sheetless base-shape parcel stays as it is.
     import geopandas as gpd
     hand, disagreeing = sq(0, 0), sq(40, 0)
     plots = [{"survey_no": "1", "geometry_source": "your placement", "geometry": hand},
              {"survey_no": "2", "geometry_source": "puvi base", "geometry": disagreeing}]
-    report = [{"survey_no": "1", "geometry_source": "your placement"},
-              {"survey_no": "2", "geometry_source": "puvi base"}]
+    report = [{"survey_no": "1", "geometry_source": "your placement", "flag": ""},
+              {"survey_no": "2", "geometry_source": "puvi base", "flag": ""}]
     base_sub = gpd.GeoDataFrame({"survey_no": ["1", "2"]},
                                 geometry=[sq(2, 0), sq(41, 0)], crs=32644)
     plots, _stats = fmb_finish.conform_village("nowhere", plots, report, base_sub)
-    assert plots[0]["geometry"].equals(hand)
+    assert plots[0]["geometry"].symmetric_difference(sq(2, 0)).area < 0.5
+    assert report[0]["flag"].endswith("refitted to the base")
     assert plots[1]["geometry"].equals(disagreeing)
 
 
@@ -149,3 +152,33 @@ def test_land_two_villages_claim_is_settled_and_his_village_keeps_it():
     fmb_finish.settle_cross_village(plots, [])
     assert plots[0]["geometry"].equals(sq(0, 0)), "the village with his placements keeps its ground"
     assert plots[0]["geometry"].intersection(plots[1]["geometry"]).area < 0.1
+
+
+def test_a_base_parcel_is_assembled_from_its_portal_units(monkeypatch):
+    # the base calls it 7; the portal drew it as 7A (west) and 7B (east)
+    import geopandas as gpd
+    from shapely.ops import unary_union
+    base = sq(0, 0, 40, 30)
+    unit_a = gpd.GeoDataFrame({"plot_no": ["1"]}, geometry=[sq(500, 500, 22, 30)])
+    unit_b = gpd.GeoDataFrame({"plot_no": ["1"]}, geometry=[sq(900, 100, 18, 30)])
+    sheets = {"7A": unit_a, "7B": unit_b}
+    monkeypatch.setattr(fmb_finish, "_unit_names", lambda v, s, keys: ["7A", "7B"])
+    monkeypatch.setattr(fmb_finish.fmb_on_base, "sheet_of",
+                        lambda v, s: ((sheets[s], unary_union(list(sheets[s].geometry)))
+                                      if s in sheets else (None, None)))
+    plots = [{"survey_no": "7", "geometry_source": "puvi base", "village_code": "v",
+              "geometry": base}]
+    report = [{"survey_no": "7", "geometry_source": "puvi base", "flag": "no sheet"}]
+    base_sub = gpd.GeoDataFrame({"survey_no": ["7"]}, geometry=[base], crs=32644)
+    plots, _stats = fmb_finish.conform_village("v", plots, report, base_sub)
+    assert len(plots) == 2
+    body = unary_union([p["geometry"] for p in plots])
+    assert body.symmetric_difference(base).area < 1.0, "the two units tile the base parcel"
+    assert plots[0]["geometry"].intersection(plots[1]["geometry"]).area < 0.5
+    assert "assembled from units" in report[0]["flag"]
+
+
+def test_a_unit_that_is_its_own_base_parcel_is_not_stolen():
+    # in Thirukatchur 52A is a base parcel itself: never a piece of base survey 52
+    names = fmb_finish._unit_names("35_04_074", "52", {"52", "52A", "52B"})
+    assert "52A" not in names and "52B" not in names
