@@ -218,8 +218,10 @@ def _adopt_units(village, survey, base_geom, proto, rep, base_keys):
                 continue
             r = {k: proto[k] for k in ("village_code", "village", "survey_no", "evidence",
                                        "run_at") if k in proto}
+            q = srow.get("plot_no", "")
+            q = "" if q is None or str(q).strip().lower() in ("", "nan", "none") else str(q).strip()
             r.update({"geometry_source": "fmb sheet",
-                      "plot_no": "%s/%s" % (u, srow.get("plot_no", "")),
+                      "plot_no": ("%s/%s" % (u, q)) if q else u,
                       "shape_match": round(pose["match"], 3), "area_ratio": round(ratio, 3),
                       "gcp_points": 0, "geometry": g})
             new.append(r)
@@ -447,6 +449,63 @@ def cross_village_overlap(plots):
     return out
 
 
+def tidy_plots(g):
+    """Delivery hygiene: junk '0' plot labels become unnumbered, and the pieces of one
+    subdivision merge into one row - but only pieces of the SAME ground (within 50 m),
+    never the duplicate-number twins that name different parcels."""
+    import numpy as np
+    from shapely.ops import unary_union
+    g = g.copy()
+    g["plot_no"] = ["" if str(q).strip().lower() in ("", "0", "nan", "none") else str(q).strip()
+                    for q in g["plot_no"]]
+    keep, drop = [], set()
+    idx = list(g.index)
+    by_key = {}
+    for i in idx:
+        q = g.at[i, "plot_no"]
+        if q:
+            by_key.setdefault((str(g.at[i, "village_code"]), str(g.at[i, "survey_no"]), q), []).append(i)
+    for _key, members in by_key.items():
+        if len(members) < 2:
+            continue
+        clusters = []
+        for i in members:
+            gi = g.geometry[i]
+            placed = False
+            for c in clusters:
+                if any(gi.distance(g.geometry[j]) <= 50.0 for j in c):
+                    c.append(i)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([i])
+        for c in clusters:
+            if len(c) > 1:
+                head = c[0]
+                g.loc[head, "geometry"] = unary_union([g.geometry[j] for j in c])
+                drop.update(c[1:])
+    return g.drop(index=sorted(drop))
+
+
+def survey_keys(survey, plot):
+    """(subdiv_no, kide) for a plot: kide is the record key Akash's team uses, 70/1A.
+
+    A plot from an assembled unit carries "unit/plot" already; a unit whose only plot repeats
+    the unit's own name (109A/109A) is the whole unit. A survey with no subdivisions is its
+    own kide.
+    """
+    s = str(survey).strip()
+    q = str(plot if plot is not None else "").strip()
+    if q in ("", "0", "None", "nan"):
+        return "", s
+    if "/" in q:
+        unit, sub = q.split("/", 1)
+        if not sub or sub == unit or sub.strip().lower() in ("0", "nan", "none"):
+            return "", unit
+        return sub, "%s/%s" % (unit, sub)
+    return q, "%s/%s" % (s, q)
+
+
 def _write_safe(geom):
     """Valid in the written CRS, not only in metres: snap, then repair what remains.
 
@@ -524,12 +583,20 @@ def main(argv=None):
         log.info("village overlap %s / %s: %.1f m2 still standing after the settle", a, b, area)
 
     g = gpd.GeoDataFrame(all_plots, geometry="geometry", crs=UTM)
+    g = tidy_plots(g)
+    g["subdiv_no"], g["kide"] = zip(*[survey_keys(s, q) for s, q in zip(g["survey_no"], g["plot_no"])])
     g["area_sqm"] = g.geometry.area.round(1)
+    g["area_acre"] = (g.geometry.area / 4046.8564224).round(4)
     g = g.to_crs(4326)
     g["geometry"] = [_write_safe(x) for x in g.geometry]
     g.to_file(out_dir / "FMB_parcels_georeferenced.geojson",
               driver="GeoJSON", COORDINATE_PRECISION=8)
     by_survey = g.dissolve(by=["village_code", "survey_no"], aggfunc="first").reset_index()
+    by_survey["subdiv_no"] = ""
+    by_survey["kide"] = by_survey["survey_no"].astype(str)
+    sqm = by_survey.to_crs(UTM).geometry.area          # the whole survey body, not its first plot
+    by_survey["area_sqm"] = sqm.round(1)
+    by_survey["area_acre"] = (sqm / 4046.8564224).round(4)
     by_survey["geometry"] = [_write_safe(x) for x in by_survey.geometry]
     by_survey.to_file(out_dir / "FMB_parcels_by_survey.geojson",
                       driver="GeoJSON", COORDINATE_PRECISION=8)
