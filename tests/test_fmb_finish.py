@@ -182,3 +182,12 @@ def test_a_unit_that_is_its_own_base_parcel_is_not_stolen():
     # in Thirukatchur 52A is a base parcel itself: never a piece of base survey 52
     names = fmb_finish._unit_names("35_04_074", "52", {"52", "52A", "52B"})
     assert "52A" not in names and "52B" not in names
+
+
+def test_a_sheet_with_a_degenerate_sliver_still_has_an_outline():
+    from autogeoref import sheets
+    from shapely.geometry import Polygon as P
+    polys = [({}, P([(0, 0), (10, 0), (10, 10), (0, 10)])),
+             ({}, P([(20, 0), (30, 0), (20, 0)]))]     # a zero-area sliver far away
+    v = sheets.outline(polys)
+    assert len(v) == 4
