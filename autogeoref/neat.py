@@ -155,8 +155,11 @@ def _acceptable(new, old):
     return new.area >= 0.85 * old.area
 
 
-def clean(gdf, printed, survey_col="survey_no"):
-    """(clean GeoDataFrame, report DataFrame). `printed`: {survey: set of PDF-neighbour surveys}."""
+def clean(gdf, printed, survey_col="survey_no", fixed_surveys=()):
+    """(clean GeoDataFrame, report DataFrame). `printed`: {survey: set of PDF-neighbour surveys}.
+
+    `fixed_surveys` are the base: never changed in any way (Akash's hand-placed rail strip 582,
+    parcels he has approved); everything else closes onto them."""
     original = list(gdf.geometry)
     geoms = [_clean_geom(g) if g is not None else shapely.Polygon() for g in original]
     surveys = [str(s) for s in gdf[survey_col]]
@@ -167,8 +170,11 @@ def clean(gdf, printed, survey_col="survey_no"):
         a, b = surveys[i], surveys[j]
         return a != b and (b in printed.get(a, set()) or a in printed.get(b, set()))
 
-    settled = set()
+    frozen = {i for i, s_ in enumerate(surveys) if s_ in {str(x) for x in fixed_surveys}}
+    settled = set(frozen)
     for i in sorted(range(len(geoms)), key=lambda i: -geoms[i].area):
+        if i in frozen:
+            continue
         g = geoms[i]
         if g.is_empty:
             settled.add(i)
@@ -260,7 +266,7 @@ def clean(gdf, printed, survey_col="survey_no"):
     tree = STRtree(geoms)
     for i in sorted(touched):
         for k in tree.query(geoms[i].buffer(0.01)):
-            if k == i or geoms[k].is_empty:
+            if k == i or k in frozen or geoms[k].is_empty:
                 continue
             snapped = shapely.snap(geoms[k], geoms[i], 0.002)
             if shapely.get_num_coordinates(snapped) != shapely.get_num_coordinates(geoms[k]) \
@@ -276,7 +282,7 @@ def clean(gdf, printed, survey_col="survey_no"):
         cand = [k for k in tree.query(piece.buffer(0.01)) if not geoms[k].is_empty]
         if len(cand) < 2:
             continue
-        cand = [k for k in cand if geoms[k].area >= 4 * piece.area]
+        cand = [k for k in cand if geoms[k].area >= 4 * piece.area and k not in frozen]
         if not cand:
             continue
         k = max(cand, key=lambda k: piece.boundary.intersection(geoms[k].buffer(0.01)).length)
@@ -310,13 +316,36 @@ def clean(gdf, printed, survey_col="survey_no"):
             for piece in _area_pieces(wedge, 0.3):
                 if piece.distance(A) > 0.01 or piece.distance(B) > 0.01 or piece.area > WEDGE_MAX_M2:
                     continue                                 # open ground, not a seam: leave it
-                cand = [k for k in tree.query(piece.buffer(0.01)) if surveys[k] in (sa, sb)
+                cand = [k for k in tree.query(piece.buffer(0.01)) if surveys[k] in (sa, sb) and k not in frozen
                         and not geoms[k].is_empty and geoms[k].area >= 4 * piece.area]
                 if not cand:
                     continue
                 k = max(cand, key=lambda k: piece.boundary.intersection(geoms[k].buffer(0.01)).length)
                 geoms[k] = _clean_geom(_union(geoms[k], piece))
                 touched.add(k)
+
+    # the base wins: whatever still overlaps a fixed parcel is trimmed along the fixed parcel's
+    # line; any overlap left between two other plots goes to the larger one
+    if frozen:
+        base = shapely.union_all([geoms[k] for k in frozen if not geoms[k].is_empty], grid_size=GRID_M)
+        for i in range(len(geoms)):
+            if i in frozen or geoms[i].is_empty or _op(shapely.intersection, geoms[i], base).area < 0.05:
+                continue
+            cut = _clean_geom(_diff(geoms[i], base))
+            if not cut.is_empty:
+                geoms[i] = cut
+                touched.add(i)
+    tree = STRtree(geoms)
+    for i in range(len(geoms)):
+        if i in frozen or geoms[i].is_empty:
+            continue
+        for j in tree.query(geoms[i]):
+            if j == i or j in frozen or geoms[j].is_empty:
+                continue
+            if _op(shapely.intersection, geoms[i], geoms[j]).area > 0.05:
+                small, big = (i, j) if geoms[i].area < geoms[j].area else (j, i)
+                geoms[small] = _clean_geom(_diff(geoms[small], geoms[big]))
+                touched.add(small)
 
     out = gdf.copy()
     out["geometry"] = [g if i in touched else original[i] for i, g in enumerate(geoms)]

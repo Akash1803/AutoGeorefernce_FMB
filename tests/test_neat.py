@@ -114,3 +114,13 @@ def test_a_corner_two_surveys_already_share_is_never_dragged():
     assert out.geometry.iloc[1].boundary.distance(corner) < 1e-6      # still on survey 1
     assert out.geometry.iloc[2].boundary.distance(corner) < 1e-6      # still on survey 3
     assert abs(out.geometry.iloc[1].area - s1.area) < 1e-6 or out.geometry.iloc[1].area > s1.area
+
+
+def test_a_fixed_base_is_never_changed_and_others_close_onto_it():
+    base = box(0, 0, 10, 30)                                            # the rail strip
+    near = Polygon([(10.4, 0), (20, 0), (20, 30), (11.5, 30)])          # 0.4-1.5 m off the strip, splaying
+    before = [base, near]
+    out, _ = neat.clean(frame(before, ["582", "51"]), {"582": {"51"}, "51": {"582"}}, fixed_surveys=["582"])
+    assert out.geometry.iloc[0].equals(base)
+    assert out.geometry.iloc[1].distance(base) < 1e-3
+    assert out.geometry.iloc[1].intersection(base).area < 1e-3
