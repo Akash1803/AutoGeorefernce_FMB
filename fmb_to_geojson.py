@@ -236,6 +236,32 @@ def drop_arrows(segs, tol):
                     if HEAD_ANGLE_DEG[0] <= ang <= HEAD_ANGLE_DEG[1]:
                         heads.append(j); sides.append(ux * vy - uy * vx > 0); far.append(b)
                     break
+            if not (len(heads) >= 2 and len(set(sides)) == 2):
+                # half-head arrow (Thirukatchur 51, 2026-09-24): a small closed triangle at the tip -
+                # one barb leaning off the line, one stroke almost along it, a short bar joining
+                # them - and nothing else continuing from the tip (a real corner has more lines)
+                strokes, ends, angs = [], [], []
+                for j in short:
+                    if j == i or j in drop:
+                        continue
+                    h = segs[j]
+                    for a, b in ((h['p0'], h['p1']), (h['p1'], h['p0'])):
+                        if math.dist(a, tip) > tol:
+                            continue
+                        hl = math.dist(a, b)
+                        if hl < 1e-6:
+                            break
+                        ang = math.degrees(math.acos(max(-1.0, min(1.0, ux * (b[0] - a[0]) / hl + uy * (b[1] - a[1]) / hl))))
+                        if ang <= HEAD_ANGLE_DEG[1]:
+                            strokes.append(j); ends.append(b); angs.append(ang)
+                        break
+                bars = [j for j in short if j not in strokes and j != i and j not in drop
+                        and any(math.dist(segs[j]['p0'], e) <= tol for e in ends)
+                        and any(math.dist(segs[j]['p1'], e) <= tol for e in ends)]
+                others_at_tip = [j for j, t in enumerate(segs) if j != i and j not in strokes and j not in bars
+                                 and min(math.dist(t['p0'], tip), math.dist(t['p1'], tip)) <= tol]
+                if len(strokes) >= 2 and bars and max(angs) >= HEAD_ANGLE_DEG[0] and not others_at_tip:
+                    heads, sides, far = strokes, [True, False], ends
             if len(heads) >= 2 and len(set(sides)) == 2:
                 drop.add(i); drop.update(heads)
                 for j in short:                              # the bar closing the head, if drawn

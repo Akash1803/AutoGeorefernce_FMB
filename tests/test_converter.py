@@ -44,3 +44,30 @@ def test_merge_slivers_leaves_an_isolated_sliver():
     far = {"area": 100.0, "rings": [[[50, 50], [60, 50], [60, 60], [50, 60], [50, 50]]]}
     out, merged = F.merge_slivers([lone, far], min_area=2.5)
     assert merged == 0 and len(out) == 2
+
+
+def test_drop_arrows_removes_a_half_head_arrow():
+    """Thirukatchur 51 (2026-09-24): the head is a small closed triangle - one barb leaning ~16 deg,
+    one stroke almost along the shaft (~3 deg), and a short bar closing them. It was kept as a
+    boundary and put a spike on corner A and a notch on corner B."""
+    tol = 2.7
+    square = [_seg((0, 0), (100, 0), "survey_boundary_main"), _seg((100, 0), (100, 100), "survey_boundary_main"),
+              _seg((100, 100), (0, 100), "survey_boundary_main"), _seg((0, 100), (0, 0), "survey_boundary_main")]
+    tip = (-20.0, 60.0)
+    arrow = [_seg((48, 60), tip),                                   # shaft, foot inside the square
+             _seg(tip, (-14.1, 61.7)),                              # barb, ~16 deg off the shaft
+             _seg(tip, (-13.9, 60.3)),                              # stroke almost along the shaft
+             _seg((-14.1, 61.7), (-13.9, 60.3))]                   # bar closing the triangle
+    kept, dropped = F.drop_arrows(square + arrow, tol)
+    assert len(dropped) == 4 and all(k in square for k in kept)
+
+
+def test_drop_arrows_keeps_a_boundary_corner_with_a_short_side():
+    """A real triangle corner (three boundary strokes meeting) is not an arrow when its 'shaft'
+    runs on as a boundary: the long line must end at the tip, nothing else continuing from it."""
+    tol = 2.7
+    lines = [_seg((0, 0), (100, 0), "survey_boundary_main"), _seg((100, 0), (106, 1.7), "survey_boundary_main"),
+             _seg((100, 0), (106, 0.3), "survey_boundary_main"), _seg((106, 1.7), (106, 0.3), "survey_boundary_main"),
+             _seg((100, 0), (100, 50), "survey_boundary_main")]
+    kept, dropped = F.drop_arrows(lines, tol)
+    assert dropped == []
