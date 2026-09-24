@@ -1,25 +1,23 @@
-"""Rebuild a hand-georeferenced village neatly: every survey from its PDF, one line per seam.
+"""Tidy a hand-georeferenced village so it reads neat and clean, WITHOUT moving any parcel.
 
     python -m autogeoref.village_clean 35_04_074 Thirukatchur --src <geojson> --out <geojson>
 
-Akash, 2026-09-24: internal lines were smudged and shapes had drifted after rounds of clip and
-fill patching (vertex bloat, fragments, slivers, drawings off by up to 31 %). Patching again
-cannot make it neat, so each survey is rebuilt:
+Akash, 2026-09-24: internal lines were smudged (double lines, zigzags, needles, slivers). A first
+attempt rebuilt every survey from its PDF at a best-fit pose; that moved parcels off the place
+he had put them (47B plot 1 by 7.7 m, 48A plot 2 shrunk to two thirds) and he rejected it: the
+placement is his and is right. So his placement is kept and only the drawing is cleaned:
 
-  1. REGENERATE: every plot comes from the survey's PDF sheet (straight internal lines, exact
-     legal shape, the sheet's plot count), placed rigidly where the survey currently sits. The
-     pose maximises agreement with the current outline AND the current plots by number, so a
-     rectangle cannot come back turned 180 degrees with its plots mirrored.
-  2. CONFLATE, railway land first then outward: each survey is fitted to the already-finished
-     surveys it borders (printed PDF neighbours, or ones it touches or overlaps). Only OUTER
-     boundary points move: a point within SNAP_TOL_M of a finished neighbour's boundary moves
-     onto it (onto a vertex when one is close, so the two share it); then every edge whose two
-     ends sit on that boundary is replaced by the neighbour's own boundary between them, so the
-     seam is one line, not two nearly-parallel ones. Internal points never move, so internal
-     lines stay the PDF's straight lines. Anything still overlapping is cut along the neighbour's
-     edge; fragments under FRAGMENT_M2 are dropped.
-  3. The report says, per survey, how far any boundary point moved and how close the result
-     stays to the drawing.
+  1. OUTLINE: each survey keeps its own outline; needles and notches narrower than 2 x TIDY_R
+     are smoothed out of it, piece by piece, and only when the piece is small.
+  2. INTERIOR: the survey's plots are made to tile that outline exactly (no overlap, no gap,
+     one shared line between two plots). The PDF's own straight internal lines are used ONLY
+     when every plot stays within PLOT_IOU_MIN / PLOT_AREA_TOL of his plot of the same number;
+     otherwise his own plots are kept and tidied.
+  3. SEAMS, railway land first then outward: where a neighbour's line is within SNAP_M the two
+     lines become one (outer points move onto the neighbour, never internal points). Empty
+     ground a thin strip wide between parcels is given to the side it changes least.
+  4. The report measures every survey and plot against the placement it was given (overlap, area, largest
+     boundary move), not only against the PDF, so a reduced or displaced parcel cannot pass.
 """
 import argparse
 import logging
@@ -141,6 +139,109 @@ def regenerate(village, survey, current):
     plots = [(lab, _clean_poly(_apply(fmb_on_base._valid(g), pose)))
              for lab, g in zip(sheet_gdf["plot_no"], sheet_gdf.geometry)]
     return [(l, g) for l, g in plots if g is not None], _apply(outline, pose)
+
+
+# --------------------------------------------------------------------------- 1b. tidy in place
+
+TIDY_R = 0.75           # needles and notches narrower than 2 x this are smoothed out of an outline
+TIDY_PIECE_M2 = 12.0    # ...one piece at a time, and only a piece this small (a real bay stays)
+SNAP_M = 1.5            # a neighbour's line this close is the same line: the two become one
+PLOT_IOU_MIN = 0.90     # the PDF's internal lines are used only when every plot stays this close
+PLOT_AREA_TOL = 0.10    # ...to his plot of the same number, and within this share of its area
+_MITRE = dict(join_style=2, mitre_limit=50.0)
+
+
+def _small(piece):
+    w = 2.0 * piece.area / piece.length if piece.length else 0.0
+    return piece.area <= TIDY_PIECE_M2 and w <= 2.0 * TIDY_R
+
+
+def tidy_outline(body):
+    """The survey's outline without needles, notches and zigzags narrower than 2 x TIDY_R.
+
+    Mitred opening and closing put every straight edge and every corner back exactly where it
+    was (a high mitre limit, so even a strip's 10-degree tip survives); what does not come back
+    is a feature too thin to have been drawn on purpose. Each removed or added piece must be
+    small, so a narrow lane or a real bay in the outline is never touched.
+    """
+    body = _clean_poly(body)
+    if body is None:
+        return None
+    opened = body.buffer(-TIDY_R, **_MITRE).buffer(TIDY_R, **_MITRE)
+    cut = [q for q in _polys(body.difference(opened)) if q.area > 1e-4 and _small(q)]
+    out = _clean_poly(body.difference(unary_union(cut))) if cut else body
+    out = out if out is not None else body
+    closed = out.buffer(TIDY_R, **_MITRE).buffer(-TIDY_R, **_MITRE)
+    add = [q for q in _polys(closed.difference(out)) if q.area > 1e-4 and _small(q)]
+    if add:
+        grown = _clean_poly(unary_union([out] + add))
+        out = grown if grown is not None else out
+    return out
+
+
+def partition(plots, outline):
+    """Plots that tile `outline` exactly. Labels never change and no plot is ever emptied.
+
+    Every plot is clipped to the outline; where two plots overlap the smaller one yields the
+    hairline; a detached crumb of a plot is handed back; ground no plot covers goes to the plot
+    bordering it, split along the straight extensions of the internal lines so that each line
+    runs on to the outline instead of stepping.
+    """
+    out = []
+    for lab, g in plots:
+        g2 = _clean_poly(g.intersection(outline)) if g is not None else None
+        out.append([lab, g2])
+    taken = None
+    for i in sorted(range(len(out)), key=lambda i: -(out[i][1].area if out[i][1] is not None else 0.0)):
+        g = out[i][1]
+        if g is None:
+            continue
+        if taken is not None and g.intersects(taken):
+            g2 = _clean_poly(g.difference(taken))
+            if g2 is not None:
+                g = g2
+        parts = _polys(g)
+        if len(parts) > 1:                       # keep the plot's own body, hand crumbs back
+            big = max(parts, key=lambda q: q.area)
+            g = unary_union([q for q in parts if q is big or q.area >= 0.25 * big.area])
+        out[i][1] = g
+        taken = g if taken is None else unary_union([taken, g])
+    plots2 = [(l, g) for l, g in out if g is not None]
+    body = unary_union([g for _l, g in plots2])
+    rest = outline.difference(body)
+    for piece in sorted([q for q in _polys(rest) if q.area > 1e-4], key=lambda q: -q.area):
+        body = unary_union([g for _l, g in plots2])
+        plots2 = _give(plots2, piece, body)
+    return [(l, _clean_poly(g) or g) for l, g in plots2]
+
+
+def _outer(g):
+    """The outer lines of a (multi)polygon, holes left out."""
+    from shapely.geometry import MultiLineString
+    return MultiLineString([list(p.exterior.coords) for p in _polys(g)])
+
+
+def _match(new, cur):
+    """For each plot of `new`, (label, IoU, area ratio) against his best plot of the same number."""
+    by = {}
+    for lab, g in cur:
+        by.setdefault(lab, []).append(g)
+    res = []
+    for lab, g in new:
+        cands = by.get(lab, [])
+        if not cands:
+            res.append((lab, 0.0, 0.0))
+            continue
+        c = max(cands, key=lambda c: _iou(g, c))
+        res.append((lab, _iou(g, c), g.area / c.area if c.area else 0.0))
+    return res
+
+
+def interior_gate(new, cur):
+    """True when the PDF's interior changes none of his plots visibly."""
+    if len(new) != len(cur) or sorted(l for l, _g in new) != sorted(l for l, _g in cur):
+        return False
+    return all(i >= PLOT_IOU_MIN and abs(r - 1.0) <= PLOT_AREA_TOL for _l, i, r in _match(new, cur))
 
 
 # --------------------------------------------------------------------------- 2. conflate
@@ -327,6 +428,424 @@ def conflate(plots, seniors, tol=SNAP_TOL_M):
     return plots, []
 
 
+# --------------------------------------------------------------------------- 3. close seams
+
+SEAM_MAX_M = 6.0        # a gap between PDF neighbours up to this is a seam and is closed
+SLIVER_MAX_M = 1.5      # between ANY two parcels a gap this thin is never a road: closed too
+HOLE_MAX_M2 = 300.0     # an enclosed hole this small is a seam, not unplaced ground
+SEAM_ROUNDS = 4
+SEAM_SHARE_MAX = 0.15   # one side takes a whole seam only if its plot grows by no more than this
+
+
+def _internal_edges(plots, body):
+    """Edges of the survey's plots that are NOT on its outline: its internal lines."""
+    out = []
+    ext = body.boundary
+    for _l, g in plots:
+        for p in _polys(g):
+            cs = list(p.exterior.coords)
+            for i in range(len(cs) - 1):
+                a, b = cs[i], cs[i + 1]
+                if ext.distance(Point((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)) > 0.01:
+                    out.append((a, b))
+    return out
+
+
+def _extension_lines(plots, body, region, reach):
+    """Straight continuations of internal lines that end on the outline next to `region`."""
+    lines = []
+    for a, b in _internal_edges(plots, body):
+        for inner, end in ((a, b), (b, a)):
+            pe = Point(end)
+            if body.boundary.distance(pe) > 0.01 or region.distance(pe) > 0.05:
+                continue
+            d = np.array(end[:2]) - np.array(inner[:2])
+            n = float(np.hypot(*d))
+            if n < 1e-6:
+                continue
+            d = d / n
+            far = (end[0] + d[0] * (reach + 3.0), end[1] + d[1] * (reach + 3.0))
+            lines.append(LineString([end[:2], far]))
+    return lines
+
+
+def _gap_between(ma, mb, width):
+    """The ground between two parcels' facing edges (morphological closing of their union)."""
+    r = width / 2.0 + 0.6
+    u = unary_union([ma, mb])
+    closed = u.buffer(r, join_style=2, mitre_limit=2.0).buffer(-r, join_style=2, mitre_limit=2.0)
+    g = closed.difference(u)
+    return [q for q in _polys(g) if q.area > 0.05 and q.distance(ma) < 0.02 and q.distance(mb) < 0.02]
+
+
+def _give(plots, piece, body):
+    """Merge `piece` into the survey's plots, each part to the plot it lies against.
+
+    The piece is first cut along the straight continuations of the internal lines that end on
+    it, reaching only across the piece (a whole-survey reach once cut a thin strip in the wrong
+    places and handed 42B's corner wedge to a plot 128 m away). A part that still lies against
+    several plots is shared out to the nearest of them, never given whole to one.
+    """
+    from shapely.ops import split as _split
+    pieces = [piece]
+    mean_w = 2.0 * piece.area / piece.length if piece.length else 0.0
+    span = max(piece.bounds[2] - piece.bounds[0], piece.bounds[3] - piece.bounds[1])
+    reach = min(span, 4.0 * mean_w + 2.0)
+    for ln in _extension_lines(plots, body, piece, reach):
+        nxt = []
+        for q in pieces:
+            try:
+                parts = [x for x in _split(q, ln).geoms if x.area > 1e-4]
+            except Exception:
+                parts = [q]
+            nxt.extend(parts if parts else [q])
+        pieces = nxt
+    plots = list(plots)
+    for q in pieces:
+        qb = q.buffer(0.02)
+        contact = {i: g.boundary.intersection(qb).length for i, (_l, g) in enumerate(plots)}
+        contact = {i: L for i, L in contact.items() if L > 0.05}
+        if not contact:
+            continue
+        top = max(contact, key=contact.get)
+        if len(contact) == 1 or contact[top] >= 0.8 * sum(contact.values()):
+            gifts = {top: q}
+        else:
+            gifts = _split_nearest(q, {i: plots[i][1] for i in contact})
+        for i, part in gifts.items():
+            lab, g = plots[i]
+            merged = unary_union([g, part])
+            merged = merged if merged.is_valid else merged.buffer(0)
+            plots[i] = (lab, merged)
+    return plots
+
+
+def _split_nearest(q, owners):
+    """{name: piece of q nearest that owner}: the gap cut down its middle line.
+
+    Built from a Voronoi diagram of points 0.25 m apart along each owner's boundary next to the
+    gap, so each side moves at most half the gap and a long sliver along several parcels is
+    shared out along its length instead of growing one parcel a tail past the others.
+    """
+    zone = q.buffer(0.5)
+    pts, who, seen = [], [], set()
+    for name, b in owners.items():
+        edge = b.boundary.intersection(zone)
+        for ln in (getattr(edge, "geoms", None) or [edge]):
+            if ln.is_empty or ln.geom_type not in ("LineString", "LinearRing") or ln.length == 0:
+                continue
+            n = max(2, int(ln.length / 0.25) + 1)
+            for i in range(n):
+                c = ln.interpolate(i * ln.length / (n - 1))
+                k = (round(c.x, 3), round(c.y, 3))
+                if k in seen or any(o != name and ob.boundary.distance(c) < 0.005 for o, ob in owners.items()):
+                    continue                     # a point two owners share decides nothing
+                seen.add(k)
+                pts.append(c)
+                who.append(name)
+    if len(set(who)) < 2:
+        return {who[0]: q} if who else {}
+    from shapely import voronoi_polygons
+    cells = voronoi_polygons(MultiPoint(pts), extend_to=q.envelope.buffer(5.0), ordered=True)
+    by = {}
+    for name, cell in zip(who, cells.geoms):
+        by.setdefault(name, []).append(cell)
+    out = {}
+    for name, cs in by.items():
+        piece = unary_union(cs).intersection(q)
+        piece = unary_union([x for x in _polys(piece) if x.area > 0.01]) if not piece.is_empty else piece
+        if not piece.is_empty:
+            out[name] = piece
+    return out
+
+
+def _receiving_plot_area(plots, piece):
+    best, blen = None, 0.0
+    qb = piece.buffer(0.02)
+    for _l, g in plots:
+        L = g.boundary.intersection(qb).length
+        if L > blen:
+            best, blen = g, L
+    return best.area if best is not None else 0.0
+
+
+def close_seams(village, done):
+    """Fill the EMPTY ground between parcels that the eye reads as a gap. Returns notes.
+
+    Pairwise distance was the wrong yardstick: two PDF neighbours can be apart because a third
+    parcel lies between them, which looks perfectly clean. What looks wrong is empty ground:
+    a thin strip or small hole with parcels on both sides. Found by morphological closing of the
+    fabric; each piece goes to the bordering survey for which it is the smallest change, split
+    along that survey's internal lines. Between PDF neighbours a gap up to SEAM_MAX_M wide is
+    closed; between parcels the sheets do NOT print as neighbours only up to SLIVER_MAX_M, so a
+    real lane between them is never filled in.
+    """
+    notes = []
+    r = SEAM_MAX_M / 2.0
+    for _round in range(SEAM_ROUNDS):
+        bodies = {s: unary_union([g for _l, g in p]) for s, p in done.items() if p}
+        adj = set()
+        for s in bodies:
+            for n in neighbours.printed(village, s):
+                if n in bodies and n != s:
+                    adj.add(tuple(sorted((s, n))))
+        u = unary_union(list(bodies.values()))
+        closed = u.buffer(r, join_style=2, mitre_limit=2.0).buffer(-r, join_style=2, mitre_limit=2.0)
+        pieces = [q for q in _polys(closed.difference(u)) if q.area > 0.01]
+        for poly in _polys(u):
+            for ring in poly.interiors:
+                h = Polygon(ring)
+                if 0.01 < h.area <= HOLE_MAX_M2 and not any(h.equals(q) for q in pieces):
+                    pieces.append(h)
+        changed = 0
+        for q in sorted(pieces, key=lambda x: x.area):
+            bodies = {s: unary_union([g for _l, g in p]) for s, p in done.items() if p}
+            around = [s for s in bodies if bodies[s].distance(q) < 0.02 and
+                      bodies[s].boundary.intersection(q.buffer(0.02)).length > 0.05]
+            if len(around) < 2:
+                continue                                  # a notch in one parcel's own outline
+            q2 = q.difference(unary_union([bodies[s] for s in around]))
+            q2 = unary_union([x for x in _polys(q2) if x.area > 0.01]) if not q2.is_empty else q2
+            if q2.is_empty:
+                continue
+            width = 2.0 * q2.area / q2.length if q2.length else 0.0
+            is_seam = any(tuple(sorted((a, b))) in adj for a in around for b in around if a < b)
+            if width > (SEAM_MAX_M if is_seam else SLIVER_MAX_M):
+                continue
+            lens = {s: bodies[s].boundary.intersection(q2.buffer(0.02)).length for s in around}
+            # the SIDES of the gap; a parcel that only closes off its end gets none of it (a
+            # railway strip touching the end of a seam grew a triangular tooth on 2026-09-24)
+            sides = [s for s in around if lens[s] >= 0.2 * max(lens.values())]
+            if len(sides) == 1 and width > SLIVER_MAX_M:
+                continue
+            one_seam = len(sides) <= 2 and min(lens[s] for s in sides) >= 0.5 * max(lens.values())
+            share = {s: q2.area / max(_receiving_plot_area(done[s], q2), 1e-6) for s in sides}
+            tgt = min(sides, key=lambda s: share[s])
+            if one_seam and share[tgt] <= SEAM_SHARE_MAX:
+                # one seam between two parcels: the side for which it is the smaller change takes
+                # it, judged by the PLOT that receives it, so a narrow strip keeps its drawn width;
+                # it takes only the part lying between the two, never a tail past its own end
+                reach = 2.5 * width + 0.05
+                between = q2.intersection(bodies[tgt].buffer(reach, join_style=2, mitre_limit=2.0))
+                between = unary_union([x for x in _polys(between) if x.area > 0.01]) if not between.is_empty else between
+                gifts = {tgt: between} if not between.is_empty else {}
+                beyond = q2.difference(between) if not between.is_empty else q2
+                for x in _polys(beyond):
+                    if x.area > 0.01:
+                        for s2, piece in _split_nearest(x, {s: bodies[s] for s in sides}).items():
+                            gifts[s2] = unary_union([gifts[s2], piece]) if s2 in gifts else piece
+            else:
+                # several parcels along it, or too much for either side alone: down the middle
+                gifts = _split_nearest(q2, {s: bodies[s] for s in sides})
+            for tgt, piece in gifts.items():
+                done[tgt] = _give(done[tgt], piece, bodies[tgt])
+            changed += 1
+            notes.append("%.1f m2 (%.2f m wide) between %s into %s" % (
+                q2.area, width, "/".join(sorted(around)),
+                "+".join("%s %.1f" % (s, gifts[s].area) for s in sorted(gifts))))
+        if not changed:
+            break
+    return notes
+
+
+# --------------------------------------------------------------------------- 4. finish the coverage
+
+MERGE_M = 0.05          # two vertices this close are the same drawn point
+SLIVER_PLOT_M = 0.5     # an UNNUMBERED plot thinner than this is a double line, not a plot
+
+
+def absorb_slivers(plots):
+    """Merge unnumbered hairline plots (a line drawn twice on the sheet) into their neighbour."""
+    keep = [(l, g) for l, g in plots]
+    changed = True
+    while changed:
+        changed = False
+        for i, (l, g) in enumerate(keep):
+            if l or g.length == 0 or 2.0 * g.area / g.length >= SLIVER_PLOT_M or len(keep) < 2:
+                continue
+            gb = g.buffer(0.02)
+            j = max((k for k in range(len(keep)) if k != i),
+                    key=lambda k: keep[k][1].boundary.intersection(gb).length)
+            if keep[j][1].boundary.intersection(gb).length <= 0:
+                continue
+            keep[j] = (keep[j][0], unary_union([keep[j][1], g]))
+            del keep[i]
+            changed = True
+            break
+    return keep
+
+
+def finish_coverage(done):
+    """One coordinate per drawn point across the whole village, and nothing left in between.
+
+    Vertices closer than MERGE_M become one (a zigzag of a few centimetres is gone and two
+    lines meeting at a point meet at the SAME point); a vertex lying on a neighbour's edge is
+    added to that edge (so a seam is one line in any GIS checker, not two that merely touch);
+    pin-holes and hairline overlaps left by the earlier steps are given to one side.
+    """
+    from scipy.spatial import cKDTree
+    items = [(s, i) for s in done for i in range(len(done[s]))]
+    coords = []
+    for s, i in items:
+        for p in _polys(done[s][i][1]):
+            for r in [p.exterior, *p.interiors]:
+                coords.extend((float(x), float(y)) for x, y in list(r.coords)[:-1])
+    if not coords:
+        return done
+    arr = np.array(coords)
+    parent = list(range(len(arr)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    for a, b in cKDTree(arr).query_pairs(MERGE_M):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+    groups = {}
+    for k in range(len(arr)):
+        groups.setdefault(find(k), []).append(k)
+    table = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        cnt = {}
+        for k in members:
+            c = (arr[k][0], arr[k][1])
+            cnt[c] = cnt.get(c, 0) + 1
+        rep = max(cnt, key=lambda c: cnt[c])
+        for k in members:
+            table[(arr[k][0], arr[k][1])] = rep
+
+    def ring(cs):
+        out = []
+        for c in list(cs)[:-1]:
+            q = table.get((float(c[0]), float(c[1])), (float(c[0]), float(c[1])))
+            if not out or (abs(q[0] - out[-1][0]) > 1e-9 or abs(q[1] - out[-1][1]) > 1e-9):
+                out.append(q)
+        while len(out) > 1 and out[0] == out[-1]:
+            out.pop()
+        return out if len(out) >= 3 else None
+
+    for s, i in items:
+        lab, g = done[s][i]
+        parts = []
+        for p in _polys(g):
+            ext = ring(p.exterior.coords)
+            if ext is None:
+                continue
+            holes = [h for h in (ring(r.coords) for r in p.interiors) if h is not None]
+            parts.append(Polygon(ext, holes))
+        ng = _clean_poly(unary_union(parts) if len(parts) > 1 else (parts[0] if parts else None))
+        done[s][i] = (lab, ng if ng is not None else g)
+    _onto_edges(done)
+    return _faces(done)
+
+
+def _onto_edges(done):
+    """A vertex within MERGE_M of another plot's edge moves onto that edge (every copy of it)."""
+    import shapely
+    items = [(s, i) for s in done for i in range(len(done[s]))]
+    segs, owner = [], []
+    for k, (s, i) in enumerate(items):
+        for p in _polys(done[s][i][1]):
+            for r in [p.exterior, *p.interiors]:
+                cs = list(r.coords)
+                for a, b in zip(cs[:-1], cs[1:]):
+                    segs.append(LineString([a, b]))
+                    owner.append(k)
+    if not segs:
+        return done
+    tree = shapely.STRtree(segs)
+    table = {}
+    for k, (s, i) in enumerate(items):
+        for p in _polys(done[s][i][1]):
+            for r in [p.exterior, *p.interiors]:
+                for c in list(r.coords)[:-1]:
+                    c = (float(c[0]), float(c[1]))
+                    if c in table:
+                        continue
+                    v = Point(c)
+                    best = None
+                    for j in tree.query(v.buffer(MERGE_M)):
+                        if owner[j] == k:
+                            continue
+                        sg = segs[j]
+                        d = sg.distance(v)
+                        if d < 1e-9 or d >= MERGE_M:
+                            continue
+                        e0, e1 = Point(sg.coords[0]), Point(sg.coords[-1])
+                        if v.distance(e0) < MERGE_M or v.distance(e1) < MERGE_M:
+                            continue                  # near its end vertex: the merge already decided
+                        if best is None or d < best[0]:
+                            best = (d, sg)
+                    if best is not None:
+                        q = best[1].interpolate(best[1].project(v))
+                        table[c] = (q.x, q.y)
+    if not table:
+        return done
+    for s, i in items:
+        lab, g = done[s][i]
+        parts = []
+        for p in _polys(g):
+            ext = [table.get((float(c[0]), float(c[1])), (float(c[0]), float(c[1]))) for c in p.exterior.coords]
+            holes = [[table.get((float(c[0]), float(c[1])), (float(c[0]), float(c[1]))) for c in r.coords]
+                     for r in p.interiors]
+            q = _clean_poly(Polygon(ext, holes))
+            if q is not None:
+                parts.append(q)
+        ng = _clean_poly(unary_union(parts) if len(parts) > 1 else (parts[0] if parts else None))
+        if ng is not None and abs(ng.area - g.area) < 0.05 * max(g.area, 1.0):
+            done[s][i] = (lab, ng)
+    return done
+
+
+PIN_M2 = 1.0            # empty ground this small inside the fabric is a pin-hole, not land
+PIN_WIDTH_M = 0.3       # ...and so is any empty strip thinner than this
+
+
+def _faces(done):
+    """Rebuild every plot from ONE noded set of lines, so neighbours share their lines exactly.
+
+    All plot outlines are noded together and polygonised into faces. Each face belongs to the
+    plot it lies in (the larger one where two overlap by a hairline); an empty face that is a
+    pin-hole goes to the plot bordering it most; real empty ground stays empty. A plot is the
+    union of its faces, so two plots meet along the very same coordinates.
+    """
+    import shapely
+    from shapely.ops import polygonize
+    items = [(s, i) for s in done for i in range(len(done[s]))]
+    geoms = [done[s][i][1] for s, i in items]
+    tree = shapely.STRtree(geoms)
+    lines = shapely.union_all([g.boundary for g in geoms], grid_size=GRID)      # snap-rounded noding
+    owned = {k: [] for k in range(len(items))}
+    pins = []
+    for f in polygonize(lines):
+        if f.area <= 1e-6:
+            continue
+        rp = f.representative_point()
+        inside = [k for k in tree.query(rp) if geoms[k].contains(rp)]
+        if inside:
+            owned[max(inside, key=lambda k: geoms[k].area)].append(f)
+        elif f.area < PIN_M2 or (f.length and 2.0 * f.area / f.length < PIN_WIDTH_M):
+            pins.append(f)
+    for f in pins:
+        fb = f.buffer(0.01)
+        cands = list(tree.query(fb))
+        if not cands:
+            continue
+        k = max(cands, key=lambda k: geoms[k].boundary.intersection(fb).length)
+        owned[k].append(f)
+    for k, (s, i) in enumerate(items):
+        if owned[k]:
+            ng = _clean_poly(shapely.union_all(owned[k], grid_size=GRID))
+            if ng is not None:
+                done[s][i] = (done[s][i][0], ng)
+    return done
+
+
 # --------------------------------------------------------------------------- village driver
 
 def tracker_status(village_code):
@@ -372,78 +891,49 @@ def processing_order(village, bodies):
     return order, adj
 
 
-def rebuild_village(village, name, src, out):
+def tidy_village(village, name, src, out):
+    """Clean one village in place. Returns (gdf, report, order); writes `out` in EPSG:4326."""
     cur = gpd.read_file(src).to_crs(UTM)
     status = tracker_status(village)
-    current = {s: [(str(l or ""), fmb_on_base._valid(g)) for l, g in zip(sub["subdiv_no"], sub.geometry)]
-               for s, sub in cur.groupby("survey_no")}
-    regen, drawn, report = {}, {}, {}
+    current = {}
+    for s, sub in cur.groupby("survey_no"):
+        cp = [(str(l or ""), _clean_poly(fmb_on_base._valid(g))) for l, g in zip(sub["subdiv_no"], sub.geometry)]
+        current[str(s)] = [(l, g) for l, g in cp if g is not None]
+    plots, report = {}, {}
     for s, cp in current.items():
-        plots, outline = regenerate(village, s, cp)
-        if plots is None:
-            regen[s] = cp                      # no sheet: keep as placed
-            report[s] = {"note": "no PDF sheet - kept as placed"}
-        else:
-            regen[s], drawn[s] = plots, outline
-    bodies = {s: unary_union([g for _l, g in p]) for s, p in regen.items()}
-    order, adj = processing_order(village, bodies)
+        body = unary_union([g for _l, g in cp])
+        outline = tidy_outline(body)
+        interior, source = None, "your plots, tidied"
+        pdf, drawn = regenerate(village, s, cp) if len(cp) > 1 else (None, None)
+        if pdf:
+            cand = partition(pdf, outline)
+            if interior_gate(cand, cp):
+                interior, source = cand, "your outline, PDF internal lines"
+        if interior is None:
+            interior = partition(cp, outline)
+        plots[s] = absorb_slivers(interior)
+        report[s] = {"source": source}
+    bodies = {s: unary_union([g for _l, g in p]) for s, p in plots.items()}
+    order, _adj = processing_order(village, bodies)
     done, finished = {}, []
     for s in order:
-        senior_names = [n for n in finished if n in adj[s] or bodies[n].intersects(bodies[s])]
-        seniors = unary_union([unary_union([g for _l, g in done[n]]) for n in senior_names]) if senior_names else None
-        plots, moves = conflate(regen[s], seniors)
-        # a seam may only close over EMPTY ground: whatever the survey gained that another survey's
-        # drawing occupies is handed back, even if that survey is not processed yet (53 closed its
-        # rail seam straight across 47B's 2.6 m strip on 2026-09-24)
-        pending = [n for n in bodies if n != s and n not in done and bodies[n].distance(bodies[s]) <= SNAP_TOL_M]
-        if pending:
-            own = unary_union([g for _l, g in regen[s]])
-            reserved = unary_union([bodies[n] for n in pending]).difference(own)
-            if not reserved.is_empty:
-                plots = [(l, _clean_poly(g.difference(reserved)) if g.intersects(reserved) else g) for l, g in plots]
-                plots = [(l, g) for l, g in plots if g is not None]
-        # anything overlapping a finished survey that is NOT a neighbour is still cut
-        others = [n for n in finished if n not in senior_names]
-        if others:
-            ob = unary_union([unary_union([g for _l, g in done[n]]) for n in others])
-            plots = [(l, _clean_poly(g.difference(ob)) if g.intersects(ob) else g) for l, g in plots]
-            plots = [(l, g) for l, g in plots if g is not None]
-        # when the cut costs this survey too much, settle each overlap by proportion instead: the
-        # side that loses the SMALLER share of itself gives the ground up (53 gives 8 % so that
-        # 47B does not lose 92 % of itself; 2026-09-24)
-        drawn_area = sum(g.area for _l, g in regen[s])
-        kept_area = sum(g.area for _l, g in plots)
-        if drawn_area and (1.0 - kept_area / drawn_area > MAX_LOSS or len(plots) < len(regen[s])):
-            mine = unary_union([g for _l, g in regen[s]])
-            keep_out = []
-            yielded = []
-            for n in finished:
-                nb = unary_union([g for _l, g in done[n]])
-                ov = nb.intersection(mine).area
-                if ov <= 0.05:
-                    continue
-                if ov / nb.area < ov / mine.area and ov / nb.area <= MAX_LOSS:
-                    done[n] = [(l, _clean_poly(g.difference(mine)) if g.intersects(mine) else g)
-                               for l, g in done[n]]
-                    done[n] = [(l, g) for l, g in done[n] if g is not None]
-                    yielded.append(n)
-                else:
-                    keep_out.append(nb)
-            plots = regen[s]
-            if keep_out:
-                ko = unary_union(keep_out)
-                plots = [(l, _clean_poly(g.difference(ko)) if g.intersects(ko) else g) for l, g in plots]
-                plots = [(l, g) for l, g in plots if g is not None]
-            if yielded:
-                report.setdefault(s, {})["note"] = "%s yielded the overlap" % ",".join(yielded)
-        done[s] = plots
+        near = [n for n in finished if bodies[n].distance(bodies[s]) <= 2.0 * SNAP_M]
+        seniors = unary_union([unary_union([g for _l, g in done[n]]) for n in near]) if near else None
+        p2, _moves = conflate(plots[s], seniors, tol=SNAP_M)
+        done[s] = p2
         finished.append(s)
-        body = unary_union([g for _l, g in plots])
-        r = report.setdefault(s, {})
-        r["max_move_m"] = round(max(moves), 2) if moves else 0.0
-        r["iou_pdf"] = round(_iou(body, drawn[s]), 3) if s in drawn else None
+    report["_seams"] = close_seams(village, done)
+    done = finish_coverage(done)
     rows = []
     for s in sorted(done, key=paths.survey_sort_key):
+        mine = unary_union([g for _l, g in current[s]])
+        new = unary_union([g for _l, g in done[s]])
+        r = report[s]
+        r["iou_yours"] = round(_iou(new, mine), 4)
+        r["area_ratio"] = round(new.area / mine.area, 4) if mine.area else None
+        r["max_move_m"] = round(_outer(new).hausdorff_distance(_outer(mine)), 2)
+        m = _match(done[s], current[s])
+        r["worst_plot"] = min(m, key=lambda x: x[1]) if m else None
         for lab, g in done[s]:
             g = set_precision(g, GRID)
             if g.is_empty:
@@ -451,15 +941,13 @@ def rebuild_village(village, name, src, out):
             sub, kide = fmb_finish.survey_keys(s, lab)
             rows.append({"village_code": village, "village": name, "kide": kide, "survey_no": s,
                          "subdiv_no": sub, "status": status.get(s, "not in tracker"),
-                         "shape_iou_pdf": report[s].get("iou_pdf"),
-                         "max_edge_move_m": report[s].get("max_move_m"),
-                         "source": "PDF sheet, rigid, seams conflated" if s in drawn else "as placed",
-                         "geometry": g})
+                         "shape_vs_yours": r["iou_yours"], "max_edge_move_m": r["max_move_m"],
+                         "source": r["source"], "geometry": g})
     gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs=UTM)
     gdf["area_sqm"] = gdf.geometry.area.round(1)
     gdf["area_acre"] = (gdf.geometry.area / ACRE).round(4)
     gdf = gdf[["village_code", "village", "kide", "survey_no", "subdiv_no", "area_acre", "area_sqm",
-               "status", "shape_iou_pdf", "max_edge_move_m", "source", "geometry"]]
+               "status", "shape_vs_yours", "max_edge_move_m", "source", "geometry"]]
     g4 = gdf.to_crs(4326)
     g4["geometry"] = [fmb_finish._write_safe(x) for x in g4.geometry]
     g4.to_file(out, driver="GeoJSON", COORDINATE_PRECISION=8)
@@ -474,7 +962,7 @@ def main(argv=None):
     ap.add_argument("--src", required=True)
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
-    gdf, report, _order = rebuild_village(a.village, a.name, a.src, a.out)
+    gdf, report, _order = tidy_village(a.village, a.name, a.src, a.out)
     print("%d plots, %d surveys -> %s" % (len(gdf), gdf.survey_no.nunique(), a.out))
     return 0
 
