@@ -201,7 +201,16 @@ def validate(village):
 
 
 def apply(village):
-    """Solve and regenerate every solved parcel from its sheet - only if validation passes."""
+    """Disabled: it rewrote Akash's hand files in place (2026-09-24 recovery).
+
+    A pose change now goes to the tool's own _auto folder and reaches his files only through
+    an approved install. The solver itself stays available through --validate.
+    """
+    raise RuntimeError("pose_solver --apply is disabled: it would rewrite hand files; "
+                       "write proposals to paths.auto_dir() and install them after approval")
+
+
+def _apply_retired(village):
     _rows, verdict = validate(village)
     log.info("validation: %s", verdict)
     if not verdict["adopt"]:

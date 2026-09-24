@@ -38,8 +38,18 @@ def points_path(village, survey):
     return vector_dir(village) / ("%s_parcels.geojson.points" % survey)
 
 
+def auto_dir(village):
+    """The tool's own folder. Nothing in it is Akash's; nothing of his is ever written from here."""
+    return vector_dir(village) / "_auto"
+
+
 def output_path(village, survey):
-    return vector_dir(village) / ("%s_parcels_modified.gpkg" % survey)
+    """Where the engine writes a placement: its own _auto folder, never a hand file name.
+
+    Until 2026-09-24 this was <s>_parcels_modified.gpkg in his folder, so tool output posed as
+    hand work and approved parcels ended up in two files (see visible.py).
+    """
+    return auto_dir(village) / ("%s_parcels_auto.gpkg" % survey)
 
 
 def status_path(village):

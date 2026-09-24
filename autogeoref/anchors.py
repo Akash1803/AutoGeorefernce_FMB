@@ -189,12 +189,13 @@ def pose_from_geometry(village, survey, gpkg_path):
 
 def load_anchors(village, tool_written):
     """One Anchor per survey that has a manual file the tool did not write."""
+    from . import visible
     out = {}
     for survey in paths.surveys_with_sheets(village):
-        for f in paths.manual_files(village, survey):       # newest first
+        for f in paths.manual_files(village, survey):       # the file his project shows first
             fp = fingerprint(f)
-            if fp in tool_written:
-                continue
+            if fp in tool_written and not visible.is_shown(f):
+                continue                                    # an approved parcel is his, whoever drew it
             pose = pose_from_points(village, survey)
             source = "points"
             if pose is None or pose[2] > POSE_RMS_LIMIT:

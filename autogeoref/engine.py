@@ -143,7 +143,7 @@ def write_parcels(village, survey, theta, t, row, out_dir=None):
                               "bearing_true_deg": round((grid + conv) % 360, 2),
                               "grid_convergence_deg": round(conv, 3),
                               "geometry": LineString([(x0, y0), (x1, y1)])})
-    target = ((out_dir / ("%s_parcels_modified.gpkg" % survey)) if out_dir
+    target = ((out_dir / ("%s_parcels_auto.gpkg" % survey)) if out_dir
               else paths.output_path(village, survey))
 
     def writer(path):

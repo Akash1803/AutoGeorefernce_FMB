@@ -70,9 +70,20 @@ def refuse_tool_write(path):
     files on 23-24 Sep) or, through a whole-file replace, deletes his layer. Neither is allowed.
     """
     p = Path(path)
+    if is_shown(p):
+        raise RuntimeError("refusing to write into %s: his QGIS project shows it" % p.name)
     if p.exists() and polygon_layers(p) and hand_layer(p) != TOOL_LAYER:
         raise RuntimeError("refusing to write layer %r into %s: QGIS shows %r there (a hand file)"
                            % (TOOL_LAYER, p.name, hand_layer(p)))
+
+
+def is_shown(path, qgz=None):
+    """True when his QGIS project shows this file (in any village): it is his, the tool keeps out."""
+    try:
+        target = Path(path).resolve()
+        return any(fp == target for _n, fp, _l in project_sources(qgz))
+    except (OSError, IndexError, KeyError, zipfile.BadZipFile):
+        return False
 
 
 def project_sources(qgz=None):

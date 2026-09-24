@@ -12,7 +12,8 @@ def test_village_directories_point_at_the_project():
 def test_sheet_and_output_paths():
     assert paths.sheet_path("35_04_077", "47B").name == "47B_parcels.geojson"
     assert paths.points_path("35_04_077", "47B").name == "47B_parcels.geojson.points"
-    assert paths.output_path("35_04_077", "47B").name == "47B_parcels_modified.gpkg"
+    assert paths.output_path("35_04_077", "47B").name == "47B_parcels_auto.gpkg"
+    assert paths.output_path("35_04_077", "47B").parent.name == "_auto"   # the tool's own folder
 
 
 def test_manual_files_are_newest_first():
