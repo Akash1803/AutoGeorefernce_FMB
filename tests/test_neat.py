@@ -124,3 +124,44 @@ def test_a_fixed_base_is_never_changed_and_others_close_onto_it():
     assert out.geometry.iloc[0].equals(base)
     assert out.geometry.iloc[1].distance(base) < 1e-3
     assert out.geometry.iloc[1].intersection(base).area < 1e-3
+
+
+def test_a_plot_wholly_inside_the_fixed_base_is_dropped_not_kept_on_top():
+    rail = box(0, 0, 100, 10)
+    inside = box(40, 2, 45, 6)                                        # drawn on the wrong side of the base
+    land = box(0, 10, 100, 30)
+    out, rep = neat.clean(frame([rail, inside, land], ["582", "47A", "47A"]), {"582": {"47A"}, "47A": {"582"}},
+                          fixed_surveys=["582"])
+    assert out.geometry.iloc[1].is_empty
+    assert out.geometry.iloc[0].equals(rail)
+
+
+def test_a_piece_cut_off_by_the_base_joins_the_plot_it_touches():
+    rail = box(0, 0, 100, 10)
+    torn = shapely.union_all([box(0, 12, 20, 20), box(24, 8, 28, 12)])  # the small part dips under the rail
+    nextdoor = box(28, 10, 50, 20)
+    out, _ = neat.clean(frame([rail, torn, nextdoor], ["582", "47A", "47A"]), {"582": {"47A"}, "47A": {"582"}},
+                        fixed_surveys=["582"])
+    rail2, a, b = out.geometry
+    assert rail2.equals(rail)
+    piece = box(24, 10, 28, 12)                                        # what is left above the rail
+    assert a.geom_type == "Polygon" and a.intersection(piece).area < 1e-6
+    assert b.geom_type == "Polygon" and b.area > 220 + 1                 # the piece joined it, in one part
+    assert a.intersection(b).area < 1e-6
+
+
+def test_a_plot_touching_only_the_tip_of_a_wedge_does_not_grow_along_it():
+    rail = box(0, 0, 100, 10)
+    land = Polygon([(30, 10.8), (100, 11.6), (100, 30), (30, 30)])  # fixed too: a 0.8-1.6 m wedge along the rail
+    small = Polygon([(20, 10), (30, 10), (30, 30), (20, 30)])       # touches the wedge's blunt end only
+    out, _ = neat.clean(frame([rail, land, small], ["582", "47A", "51"]),
+                        {"582": {"47A", "51"}, "47A": {"582", "51"}, "51": {"582", "47A"}}, fixed_surveys=["582", "47A"])
+    assert out.geometry.iloc[2].bounds[2] <= 30.5                     # 51 did not run along the rail
+
+
+def test_a_first_survey_keeps_its_line_and_the_big_neighbour_closes_onto_it():
+    strip = box(10, 0, 14, 40)
+    big = box(13.5, 0, 60, 40)                                         # a 0.5 m sliver over the strip
+    out, _ = neat.clean(frame([strip, big], ["51", "50B"]), {"51": {"50B"}, "50B": {"51"}}, first_surveys=["51"])
+    a, b = out.geometry
+    assert abs(a.area - strip.area) < 0.01 and a.intersection(b).area < 1e-3

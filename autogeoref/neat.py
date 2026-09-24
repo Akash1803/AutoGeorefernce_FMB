@@ -33,6 +33,7 @@ GAP_PDF_M = 5.0         # how far a vertex may move onto a PDF neighbour (never 
 GAP_ANY_M = 0.6         # how far a vertex may move onto any plot (a double line)
 WEDGE_M = 1.5           # a wedge left between PDF neighbours is closed up to 2 x this width
 WEDGE_MAX_M2 = 40.0     # ... and only up to this size; anything bigger is open ground
+SIDE_SHARE = 0.2        # a gap piece joins a plot only if that plot forms at least this share of its outline
 MIN_PIECE_M2 = 0.05
 GRID_M = 0.001
 
@@ -149,19 +150,28 @@ def _crosses_a_parcel(v, t, i, geoms, tree):
     return False
 
 
+def _side_share(piece, plot):
+    """Share of a gap piece's outline that runs along the plot: a plot that only touches the tip of a
+    long wedge (the wedge lies between two other parcels) must not grow along it."""
+    return piece.boundary.intersection(plot.buffer(0.01)).length / max(piece.length, 1e-9)
+
+
 def _acceptable(new, old):
     if new.is_empty or not new.is_valid or len(_polys(new)) > max(1, len(_polys(old))):
         return False
     return new.area >= 0.85 * old.area
 
 
-def clean(gdf, printed, survey_col="survey_no", fixed_surveys=()):
+def clean(gdf, printed, survey_col="survey_no", fixed_surveys=(), first_surveys=()):
     """(clean GeoDataFrame, report DataFrame). `printed`: {survey: set of PDF-neighbour surveys}.
 
     `fixed_surveys` are the base: never changed in any way (Akash's hand-placed rail strip 582,
-    parcels he has approved); everything else closes onto them."""
+    parcels he has approved); everything else closes onto them.
+    `first_surveys` settle right after the base, before bigger plots: where they meet a later plot
+    the later one closes onto them (a small strip is not squeezed by a big neighbour's sliver)."""
     original = list(gdf.geometry)
     geoms = [_clean_geom(g) if g is not None else shapely.Polygon() for g in original]
+    start_area = [g.area for g in geoms]            # a plot's size before it absorbs anything
     surveys = [str(s) for s in gdf[survey_col]]
     before = list(geoms)
     touched = set()
@@ -172,7 +182,8 @@ def clean(gdf, printed, survey_col="survey_no", fixed_surveys=()):
 
     frozen = {i for i, s_ in enumerate(surveys) if s_ in {str(x) for x in fixed_surveys}}
     settled = set(frozen)
-    for i in sorted(range(len(geoms)), key=lambda i: -geoms[i].area):
+    first = {str(x) for x in first_surveys}
+    for i in sorted(range(len(geoms)), key=lambda i: (surveys[i] not in first, -geoms[i].area)):
         if i in frozen:
             continue
         g = geoms[i]
@@ -282,10 +293,11 @@ def clean(gdf, printed, survey_col="survey_no", fixed_surveys=()):
         cand = [k for k in tree.query(piece.buffer(0.01)) if not geoms[k].is_empty]
         if len(cand) < 2:
             continue
-        cand = [k for k in cand if geoms[k].area >= 4 * piece.area and k not in frozen]
+        cand = [k for k in cand if start_area[k] >= 4 * piece.area and k not in frozen
+                and _side_share(piece, geoms[k]) >= SIDE_SHARE]
         if not cand:
             continue
-        k = max(cand, key=lambda k: piece.boundary.intersection(geoms[k].buffer(0.01)).length)
+        k = max(cand, key=lambda k: _side_share(piece, geoms[k]))
         geoms[k] = _clean_geom(_union(geoms[k], piece))
         touched.add(k)
 
@@ -331,10 +343,8 @@ def clean(gdf, printed, survey_col="survey_no", fixed_surveys=()):
         for i in range(len(geoms)):
             if i in frozen or geoms[i].is_empty or _op(shapely.intersection, geoms[i], base).area < 0.05:
                 continue
-            cut = _clean_geom(_diff(geoms[i], base))
-            if not cut.is_empty:
-                geoms[i] = cut
-                touched.add(i)
+            geoms[i] = _clean_geom(_diff(geoms[i], base))   # empty when the plot lies wholly in the base
+            touched.add(i)
     tree = STRtree(geoms)
     for i in range(len(geoms)):
         if i in frozen or geoms[i].is_empty:
@@ -346,6 +356,28 @@ def clean(gdf, printed, survey_col="survey_no", fixed_surveys=()):
                 small, big = (i, j) if geoms[i].area < geoms[j].area else (j, i)
                 geoms[small] = _clean_geom(_diff(geoms[small], geoms[big]))
                 touched.add(small)
+
+    # a trim can leave a plot in pieces; a detached piece joins the plot it shares most line with
+    tree = STRtree(geoms)
+    for i in sorted(touched):
+        parts = sorted(_polys(geoms[i]), key=lambda p: p.area, reverse=True)
+        if len(parts) < 2:
+            continue
+        keep = [parts[0]]
+        for piece in parts[1:]:
+            best, best_len = None, 0.5
+            for j in tree.query(piece.buffer(0.01)):
+                if j == i or j in frozen or geoms[j].is_empty:
+                    continue
+                shared = _op(shapely.intersection, piece.boundary, geoms[j].buffer(0.01)).length
+                if shared > best_len:
+                    best, best_len = j, shared
+            if best is None:
+                keep.append(piece)
+            else:
+                geoms[best] = _clean_geom(_union(geoms[best], piece))
+                touched.add(best)
+        geoms[i] = _clean_geom(shapely.union_all(keep))
 
     out = gdf.copy()
     out["geometry"] = [g if i in touched else original[i] for i, g in enumerate(geoms)]
