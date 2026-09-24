@@ -25,7 +25,7 @@ def parse(argv=None):
                     help="skip the QGIS review group")
     ap.add_argument("--project", help="path to the .qgz the review group belongs in")
     ap.add_argument("--tracker", action="store_true",
-                    help="also add the Auto colour/note/run columns to the tracker workbook")
+                    help="retired: the tracker is written only by review.mark_qc_passed after approval")
     ap.add_argument("--config", help="JSON config (default configs/default.json or $AUTOGEOREF_CONFIG)")
     ap.add_argument("--rows", dest="rows", action="store_true", default=True,
                     help="append one feature row per placed parcel to _logs/eval/rows.csv (default)")
@@ -138,8 +138,8 @@ def main(argv=None):
         if names:
             print("  %-5s %s" % (colour, ", ".join(names)))
     if args.tracker:
-        print("  tracker:", review.update_tracker(
-            [dict(r, village_code=args.village, run=r.get("run", "")) for r in rows]))
+        print("  tracker: not written - Status becomes 'QC Passed' only after Akash approves "
+              "(review.mark_qc_passed); the tool adds no columns")
     print("  worklist:", review.write_worklist(_corridor_rows(args.village, rows)))
     return 0
 

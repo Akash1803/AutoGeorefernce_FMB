@@ -21,7 +21,6 @@ STATUS_COLUMNS = ["survey", "status", "method", "colour", "confidence", "share",
                   "anchor_partners", "pass", "in_window", "neighbours", "heading_deg", "pose_tx", "pose_ty",
                   "shift_m", "sigma_pos_m", "sigma_head_deg", "puvi_reference_m", "puvi_trusted",
                   "puvi_ratio", "anchor_file", "notes", "file", "fp_placed", "fp_final", "run"]
-TRACKER_COLUMNS = ["Auto colour", "Auto note", "Auto run"]
 COLOURS = {"green": "#19e68c", "amber": "#ffb000", "red": "#ff4136", "anchor": "#000000"}
 
 
@@ -102,118 +101,89 @@ def _widths(sheet, first, widths):
     return sheet.replace(m.group(0), head + own + tail, 1)
 
 
-def update_tracker(rows, workbook=None):
-    """Add the three tool-owned columns, keyed by village code + survey number.
+STATUS_COLUMN = "J"
+QC_PASSED = "QC Passed"
 
-    Returns 'applied', 'locked', 'no change' or 'no workbook'.
+
+def update_tracker(rows, workbook=None):
+    """Retired 2026-09-24: it added "Auto colour/note/run" columns Akash deleted on 23 Sep."""
+    raise RuntimeError("update_tracker is retired; the tracker takes only Status = 'QC Passed' "
+                       "after Akash approves a parcel: review.mark_qc_passed(village, surveys)")
+
+
+def mark_qc_passed(village, surveys, workbook=None):
+    """Set his Status column to "QC Passed" for these surveys of one village - nothing else.
+
+    Rows are found by village number (column G) and survey (column H). Only the Status cell's
+    value changes; its style, the dropdowns, filter and conditional formats stay as they are.
+    Cached formula results are dropped so the Summary recounts when Excel opens the file.
+    Returns (result, [surveys not found]); result is applied / locked / no change / no workbook.
     """
     workbook = Path(workbook or paths.TRACKER)
     if not workbook.exists():
-        return "no workbook"
+        return "no workbook", sorted(map(str, surveys))
     if (workbook.parent / ("~$" + workbook.name)).exists():
-        return "locked"
+        return "locked", []
     zin = zipfile.ZipFile(workbook)
+    infos = {i.filename: i for i in zin.infolist()}
     parts = {n: zin.read(n) for n in zin.namelist()}
     zin.close()
     sheet = parts["xl/worksheets/sheet1.xml"].decode("utf-8")
-    shared = parts["xl/sharedStrings.xml"].decode("utf-8")
-    values = _shared_strings(shared)
-
-    header = re.search(r'<row r="1".*?</row>', sheet, re.S).group(0)
-    used = re.findall(r'<c r="([A-Z]+)1"', header)
-    last_col = used[-1]
-    rowmap = {}
-    for m in re.finditer(r'<row r="(\d+)".*?</row>', sheet, re.S):
-        rid, body = int(m.group(1)), m.group(0)
+    values = _shared_strings(parts["xl/sharedStrings.xml"].decode("utf-8"))
+    if QC_PASSED not in values:
+        raise ValueError("the tracker has no '%s' text; its Status list changed" % QC_PASSED)
+    idx = values.index(QC_PASSED)
+    village_no = str(village).split("_")[-1].lstrip("0") or "0"
+    want = {str(s) for s in surveys}
+    found, changed = set(), 0
+    for m in list(re.finditer(r'<row r="(\d+)"[^>]*>.*?</row>', sheet, re.S)):
+        rid = int(m.group(1))
         if rid == 1:
             continue
+        body = m.group(0)
         g = re.search(r'<c r="G%d"[^>]*><v>(\d+)</v></c>' % rid, body)
         h = re.search(r'<c r="H%d"[^>]*t="s"><v>(\d+)</v></c>' % rid, body)
-        if g and h:
-            rowmap[(g.group(1), values[int(h.group(1))])] = rid
-
-    new_strings = []
-
-    def sref(text):
-        if text in values:
-            return values.index(text)
-        if text in new_strings:
-            return len(values) + new_strings.index(text)
-        new_strings.append(text)
-        return len(values) + len(new_strings) - 1
-
-    # reuse the tool's columns when they exist: a second update must never add S, T, U
-    existing = {}
-    for m in re.finditer(r'<c r="([A-Z]+)1"[^>]*t="s"><v>(\d+)</v></c>', header):
-        idx = int(m.group(2))
-        if idx < len(values) and values[idx] in TRACKER_COLUMNS:
-            existing[values[idx]] = m.group(1)
-    cols, cursor = {}, last_col
-    for name in TRACKER_COLUMNS:
-        if name in existing:
-            cols[name] = existing[name]
+        if not (g and h) or g.group(1) != village_no or values[int(h.group(1))] not in want:
             continue
-        cursor = _next_col(cursor)
-        cols[name] = cursor
-        sheet = sheet.replace(header, header.replace(
-            "</row>", '<c r="%s1" s="7" t="s"><v>%d</v></c></row>' % (cursor, sref(name))), 1)
-        header = re.search(r'<row r="1".*?</row>', sheet, re.S).group(0)
-
-    changed = 0
-    for r in rows:
-        village_no = str(r.get("village_code", "")).split("_")[-1].lstrip("0") or "0"
-        rid = rowmap.get((village_no, str(r.get("survey", ""))))
-        if rid is None:
-            continue
-        cells = "".join('<c r="%s%d" s="9" t="s"><v>%d</v></c>' % (cols[name], rid, sref(str(val)))
-                        for name, val in (("Auto colour", r.get("colour", "")),
-                                          ("Auto note", r.get("notes", "")),
-                                          ("Auto run", r.get("run", ""))) if str(val))
-        if not cells:
-            continue
-        def _swap(m):
-            body = m.group(1)
-            for col in cols.values():           # an earlier value at the same cell gives way
-                body = re.sub(r'<c r="%s%d".*?</c>' % (col, rid), "", body, flags=re.S)
-            return body + cells + "</row>"
-        sheet = re.sub(r'(<row r="%d".*?)</row>' % rid, _swap, sheet, count=1, flags=re.S)
+        found.add(values[int(h.group(1))])
+        cell = re.search(r'<c r="%s%d"([^>]*?)(?:/>|>.*?</c>)' % (STATUS_COLUMN, rid), body, re.S)
+        if cell:
+            attrs = re.sub(r'\s+t="[^"]*"', "", cell.group(1))
+            new_cell = '<c r="%s%d"%s t="s"><v>%d</v></c>' % (STATUS_COLUMN, rid, attrs, idx)
+            if cell.group(0) == new_cell:
+                continue
+            new_body = body.replace(cell.group(0), new_cell, 1)
+        else:
+            new_cell = '<c r="%s%d" t="s"><v>%d</v></c>' % (STATUS_COLUMN, rid, idx)
+            prev = re.search(r'<c r="I%d"[^>]*?(?:/>|>.*?</c>)' % rid, body, re.S) or h
+            new_body = body.replace(prev.group(0), prev.group(0) + new_cell, 1)
+        sheet = sheet.replace(body, new_body, 1)
         changed += 1
+    missing = sorted(want - found)
     if not changed:
-        return "no change"
-    if new_strings:
-        n0 = int(re.search(r'uniqueCount="(\d+)"', shared).group(1))
-        c0 = int(re.search(r'\bcount="(\d+)"', shared).group(1))
-        shared = shared.replace("</sst>", "".join("<si><t>%s</t></si>" % _escape(s)
-                                                  for s in new_strings) + "</sst>")
-        shared = shared.replace('count="%d" uniqueCount="%d"' % (c0, n0),
-                                'count="%d" uniqueCount="%d"' % (c0 + changed * 3, n0 + len(new_strings)), 1)
-        parts["xl/sharedStrings.xml"] = shared.encode("utf-8")
-    last = cols[TRACKER_COLUMNS[-1]]
-    sheet = re.sub(r'<dimension ref="A1:[A-Z]+(\d+)"/>',
-                   lambda m: '<dimension ref="A1:%s%s"/>' % (last, m.group(1)), sheet, count=1)
-    # the filter must reach the new columns, or they read as frozen next to a filtered table
-    sheet = re.sub(r'(<autoFilter ref="A1:)[A-Z]+(\d+")',
-                   lambda m: m.group(1) + last + m.group(2), sheet, count=1)
-    sheet = _widths(sheet, _index(last) - len(TRACKER_COLUMNS) + 1, [10, 40, 20])
+        return "no change", missing
     parts["xl/worksheets/sheet1.xml"] = sheet.encode("utf-8")
+    for name in [n for n in parts if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")]:
+        xml = parts[name].decode("utf-8")
+        xml2 = re.sub(r'(<f[^>]*>[^<]*</f>|<f[^>]*/>)<v>[^<]*</v>', lambda m: m.group(1), xml)
+        if xml2 != xml:
+            parts[name] = xml2.encode("utf-8")
     parts["xl/workbook.xml"] = re.sub(rb'<calcPr(?![^>]*fullCalcOnLoad)', b'<calcPr fullCalcOnLoad="1"',
                                       parts["xl/workbook.xml"], count=1)
-    # the project tracker is backed up under _logs; any other workbook (a test copy, a trial)
-    # is backed up beside itself, so test runs never write into the project folder
     backup = paths.logs_dir() / "tracker_backups" if workbook == paths.TRACKER else workbook.parent / "backups"
     backup.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(workbook, backup / (workbook.stem + "_before_autogeoref_%s.xlsx"
+    shutil.copy2(workbook, backup / (workbook.stem + "_before_qc_passed_%s.xlsx"
                                      % datetime.datetime.now().strftime("%Y%m%d%H%M%S")))
     tmp = workbook.with_suffix(".xlsx.autogeoref-tmp")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zo:
         for name, data in parts.items():
-            zo.writestr(name, data)
+            zo.writestr(infos[name], data)
     try:
         tmp.replace(workbook)
     except PermissionError:
         tmp.unlink(missing_ok=True)
-        return "locked"
-    return "applied"
+        return "locked", missing
+    return "applied", missing
 
 
 # --------------------------------------------------------------------------- QGIS review group
