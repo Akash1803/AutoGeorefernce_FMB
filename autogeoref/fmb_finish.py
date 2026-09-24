@@ -496,7 +496,7 @@ def survey_keys(survey, plot):
     """
     s = str(survey).strip()
     q = str(plot if plot is not None else "").strip()
-    if q in ("", "0", "None", "nan"):
+    if q in ("", "0", "None", "nan") or q == s:      # a plot named after its survey is the whole survey
         return "", s
     if "/" in q:
         unit, sub = q.split("/", 1)
