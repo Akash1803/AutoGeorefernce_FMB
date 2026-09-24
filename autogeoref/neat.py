@@ -167,8 +167,9 @@ def clean(gdf, printed, survey_col="survey_no", fixed_surveys=(), first_surveys=
 
     `fixed_surveys` are the base: never changed in any way (Akash's hand-placed rail strip 582,
     parcels he has approved); everything else closes onto them.
-    `first_surveys` settle right after the base, before bigger plots: where they meet a later plot
-    the later one closes onto them (a small strip is not squeezed by a big neighbour's sliver)."""
+    `first_surveys` settle right after the base, in the order given, before bigger plots: where they
+    meet a later plot the later one closes onto them (a small strip is not squeezed by a big
+    neighbour's sliver)."""
     original = list(gdf.geometry)
     geoms = [_clean_geom(g) if g is not None else shapely.Polygon() for g in original]
     start_area = [g.area for g in geoms]            # a plot's size before it absorbs anything
@@ -182,8 +183,8 @@ def clean(gdf, printed, survey_col="survey_no", fixed_surveys=(), first_surveys=
 
     frozen = {i for i, s_ in enumerate(surveys) if s_ in {str(x) for x in fixed_surveys}}
     settled = set(frozen)
-    first = {str(x) for x in first_surveys}
-    for i in sorted(range(len(geoms)), key=lambda i: (surveys[i] not in first, -geoms[i].area)):
+    first = {str(x): r for r, x in enumerate(first_surveys)}          # settled in the order given
+    for i in sorted(range(len(geoms)), key=lambda i: (first.get(surveys[i], len(first)), -geoms[i].area)):
         if i in frozen:
             continue
         g = geoms[i]
