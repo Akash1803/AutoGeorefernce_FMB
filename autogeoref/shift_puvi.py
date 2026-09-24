@@ -24,7 +24,7 @@ from shapely.geometry import MultiPolygon, Polygon
 from shapely.ops import unary_union
 from shapely.validation import make_valid
 
-from . import engine, paths, shiftfit
+from . import engine, paths, shiftfit, visible
 
 log = logging.getLogger(__name__)
 
@@ -672,7 +672,7 @@ def control_parcels(village, extra_files=()):
     out = {}
     for f in sorted(paths.vector_dir(village).glob("*_parcels_modified.gpkg")):
         key = shiftfit.normalise(f.name.split("_parcels_modified")[0])
-        g = gpd.read_file(f)
+        g = visible.read_hand(f)
         if g.crs is not None and g.crs.to_epsg() != UTM:
             g = g.to_crs(UTM)
         body = unary_union([x for x in (_valid(v) for v in g.geometry) if x is not None])

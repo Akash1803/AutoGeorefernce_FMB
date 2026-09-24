@@ -16,7 +16,7 @@ from shapely.geometry import LineString, Polygon
 from shapely.ops import unary_union
 
 from . import (align, anchors, edges as edgemod, files, fit, gcp, match, neighbours,
-               paths, raster, review, sheets, topology, window)
+               paths, raster, review, sheets, topology, visible, window)
 
 ACRE = 0.000247105381
 SIGMA_AUTO = 0.30
@@ -152,6 +152,7 @@ def write_parcels(village, survey, theta, t, row, out_dir=None):
         gpd.GeoDataFrame(edge_rows, geometry="geometry", crs="EPSG:32644").to_file(
             path, layer="edges", driver="GPKG")
 
+    visible.refuse_tool_write(target)
     if target.exists():
         if not files.safe_write(target, writer, allow_release=True):
             raise PermissionError("cannot replace %s (open in QGIS?)" % target)
@@ -733,7 +734,7 @@ def run(village, do_raster=False, do_topology=False, do_review=True, project=Non
 def team_geometry(village, anchor):
     """The hand-placed parcel exactly as the team saved it, dissolved to one body."""
     try:
-        hand = gpd.read_file(anchor.file)
+        hand = visible.read_hand(anchor.file)
         if hand.crs is not None and hand.crs.to_epsg() != 32644:
             hand = hand.to_crs(32644)
         body = unary_union([g.buffer(0) for g in hand.geometry if g is not None and not g.is_empty])
@@ -779,6 +780,7 @@ def write_topology(village, written, adjusted, anchor_bodies, order, rail=()):
         if not notes:
             continue
         target = paths.output_path(village, s)
+        visible.refuse_tool_write(target)
         old = gpd.read_file(target, layer="parcels")
 
         def pkey(pid, pno):

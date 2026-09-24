@@ -10,7 +10,7 @@ import numpy as np
 from shapely.geometry import Point, shape
 from shapely.ops import unary_union
 
-from . import fit, paths, sheets
+from . import fit, paths, sheets, visible
 
 POINTS_HEADER = "mapX,mapY,sourceX,sourceY,enable,dX,dY,residual"
 POSE_RMS_LIMIT = 3.0        # above this the .points fit is not trusted; use the geometry instead
@@ -96,7 +96,7 @@ def pose_from_geometry(village, survey, gpkg_path):
     import geopandas as gpd
     from shapely import affinity
 
-    hand = gpd.read_file(gpkg_path)
+    hand = visible.read_hand(gpkg_path)
     if hand.crs is not None and hand.crs.to_epsg() != 32644:
         hand = hand.to_crs(32644)
     sheet = {int(p.get("poly_id", i)): g for i, (p, g) in enumerate(sheets.load_sheet(village, survey))}
@@ -215,7 +215,7 @@ def _area_scale(village, survey, gpkg_path):
     """sqrt(hand area / sheet area): 1.00 means the hand placement kept the FMB size."""
     import geopandas as gpd
     try:
-        hand = gpd.read_file(gpkg_path)
+        hand = visible.read_hand(gpkg_path)
     except Exception:
         return float("nan")
     if hand.crs is not None and hand.crs.to_epsg() != 32644:

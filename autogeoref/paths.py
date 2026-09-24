@@ -10,6 +10,8 @@ BUFFER_LAYER = "vector_in_buffer_30m"
 RAIL_GPKG = PROJECT / "Tambaram_Chengalpattu_Railway.gpkg"
 RAIL_LAYER = "rail_line"
 TRACKER = PROJECT / "Georeferencing_Tracker.xlsx"
+# Akash's QGIS project: the layers it points at are the parcels as he sees them (see visible.py)
+QGIS_PROJECT = Path(r"D:\Projects\CUMTA\15Sep26\New folder\CUMTA_Georeferencing.qgz")
 
 
 def vector_dir(village):
@@ -70,9 +72,22 @@ def survey_sort_key(survey):
 
 
 def manual_files(village, survey):
-    """Every hand-placed GeoPackage for this survey, newest modification time first."""
-    hits = list(vector_dir(village).glob("%s_parcels_modified*.gpkg" % survey))
-    return sorted(hits, key=lambda p: p.stat().st_mtime, reverse=True)
+    """Every hand-placed GeoPackage for this survey, the one his QGIS project shows first.
+
+    Newest modification time is only the fallback: on 2026-09-23 an approved parcel lived in
+    <s>_parcels_auto.gpkg (shown in QGIS) and a stale copy in <s>_parcels_modified.gpkg (edited by
+    the tool), and "newest" picked the copy he never saw.
+    """
+    hits = sorted(vector_dir(village).glob("%s_parcels_modified*.gpkg" % survey),
+                  key=lambda p: p.stat().st_mtime, reverse=True)
+    try:
+        from . import visible
+        seen = visible.shown(village).get(str(survey))
+    except Exception:
+        seen = None
+    if seen is not None:
+        hits = [seen[0]] + [h for h in hits if h.resolve() != seen[0]]
+    return hits
 
 
 def surveys_with_sheets(village):

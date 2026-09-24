@@ -28,7 +28,7 @@ import sys
 import geopandas as gpd
 import numpy as np
 
-from . import anchors, engine, fit, fmb_on_base, match, paths, review, sheets
+from . import anchors, engine, fit, fmb_on_base, match, paths, review, sheets, visible
 
 log = logging.getLogger(__name__)
 
@@ -216,6 +216,7 @@ def apply(village):
     moved = {}
     for s, r in sol.items():
         f = vd / ("%s_parcels_modified.gpkg" % s)
+        visible.refuse_tool_write(f)
         shutil.copy2(f, bdir / f.name)
         plots = sheets.load_sheet(village, s)
         rows = [{"plot_no": str((p or {}).get("plot_no", "")), "survey_no": s,
