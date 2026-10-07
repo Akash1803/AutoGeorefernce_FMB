@@ -68,7 +68,7 @@ def cmd_ring(a):
     wanted = [s.strip() for s in a.surveys.split(",")] if a.surveys else None
     if wanted and not a.no_qgis:
         print("cleared earlier red layers:", ring_io.clear_unapproved(a.village, wanted))
-    decisions, sheet_objs, ctx = ring.place_ring(a.village, seeds, table, size=a.size, ring=wanted, in_order=a.in_order)
+    decisions, sheet_objs, ctx = ring.place_ring(a.village, seeds, table, size=a.size, ring=wanted, in_order=a.in_order, own_sheet=a.own_sheet)
     d = ring_io.batch_dir(a.village)
 
     rows, placed = [], []
@@ -143,6 +143,7 @@ def main(argv=None):
     r.add_argument("--surveys", help="place exactly these surveys (comma separated)")
     r.add_argument("--in-order", action="store_true", help="place one by one in the order given")
     r.add_argument("--build-on-red", action="store_true", help="red (not yet approved) parcels of earlier batches count as placed")
+    r.add_argument("--own-sheet", action="store_true", help="also trust neighbours that only the sheet being placed prints")
     r.add_argument("--no-qgis", action="store_true")
     r.add_argument("--no-satellite", action="store_true", help="skip the Google Satellite check")
     r.set_defaults(fn=cmd_ring)

@@ -170,12 +170,16 @@ class Context:
             return True
         return abs(((theta - self.rotation) + 180) % 360 - 180) <= ROT_WINDOW_DEG + self.rotation_spread
 
+    own_sheet = False       # also trust a neighbour the sheet being placed prints (70A prints 72; 72 prints nothing back)
+
     def named(self, a, b):
         """'agreed' | 'one-sided' | 'neither' | 'unknown' (a sheet is not read)."""
         a, b = str(a).upper(), str(b).upper()
         if a not in self.printed or b not in self.printed:
             return "unknown"
         x, y = b in self.printed[a], a in self.printed[b]
+        if self.own_sheet and x and not y:
+            return "agreed"
         return "agreed" if x and y else "one-sided" if x or y else "neither"
 
 
@@ -530,10 +534,11 @@ def seed_rotations(village, seeds, table):
     return out
 
 
-def place_ring(village, seeds, table, size=8, ring=None, log=print, in_order=False):
+def place_ring(village, seeds, table, size=8, ring=None, log=print, in_order=False, own_sheet=False):
     """Greedy: place the sheet with the clearest win, add it to the placed set, repeat. With in_order the
     sheets are placed one by one in the order given (rail strips first, Akash's rule of 2026-09-23)."""
     ctx = Context(seeds, table, seeds.keys())
+    ctx.own_sheet = own_sheet
     seed_poses = seed_rotations(village, seeds, table)
     ctx.poses.update(seed_poses)
     for k in seed_poses:
