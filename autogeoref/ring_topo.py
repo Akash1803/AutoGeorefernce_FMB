@@ -144,6 +144,101 @@ def _largest(geom):
     return max(parts, key=lambda p: p.area) if parts else geom
 
 
+KX_M, KY_M = 108600.0, 110540.0          # metres per degree near 12.7 N
+SIDE_SHARE = 0.6                         # share of half the face perimeter that must run along the receiving parcel
+
+
+def _width_m(face):
+    """Mean width of a face in metres (2 x area / perimeter)."""
+    a = face.area * KX_M * KY_M
+    per = shapely.length(shapely.affinity.scale(face.exterior, KX_M, KY_M, origin=(0, 0)))
+    return 2 * a / per if per else 0.0
+
+
+def _short_side_m(face):
+    """Shorter side of the face's minimum rotated rectangle in metres: the widest point of a seam sliver. A mean
+    width let an 86 m2 triangle 6.45 m tall join 73 at its south end (open land toward 75, 2026-10-07)."""
+    r = np.array(face.minimum_rotated_rectangle.exterior.coords)[:3] * [KX_M, KY_M]
+    return float(min(np.hypot(*(r[1] - r[0])), np.hypot(*(r[2] - r[1]))))
+
+
+def exact_seams(cand, fixed, max_width_m):
+    """A parcel gives way to fixed parcels using only lines that already exist (EPSG:4326 in and out).
+
+    The boundaries of `cand` (one survey, a list of plot Polygons) and of the fixed Polygons near it are noded and
+    polygonized; faces of `cand` lying in a fixed parcel are dropped, and faces in neither that touch both and are
+    at most `max_width_m` wide join `cand` (the plot sharing most boundary with them). No vertex is moved, so no
+    step or spike can appear - the vertex-snapping cleaner made those on 2026-10-07."""
+    cu = unary_union(cand)
+    near = [f for f in fixed if f.distance(cu) < 3 * max_width_m / KX_M]
+    if not near:
+        return list(cand)
+    fu = unary_union(near)
+    lines = unary_union([p.exterior for p in cand] + [p.exterior for f in near for p in getattr(f, "geoms", [f])])
+    keep = {i: [] for i in range(len(cand))}
+    for face in shapely.ops.polygonize(lines):
+        rp = face.representative_point()
+        in_fixed = fu.contains(rp)
+        owner = next((i for i, p in enumerate(cand) if p.contains(rp)), None)
+        if owner is not None and not in_fixed:
+            keep[owner].append(face)
+        elif owner is None and not in_fixed:
+            touch = [(face.boundary.intersection(p.buffer(1e-9)).length, i) for i, p in enumerate(cand) if face.distance(p) < 1e-9]
+            # the face must lie ALONG the parcel (share at least SIDE_SHARE of half its perimeter): a wedge touching
+            # it only by its base would become an 85 m needle (72 along 267's tapered end, 2026-10-07)
+            if touch and face.distance(fu) < 1e-9 and _short_side_m(face) <= max_width_m \
+                    and max(touch)[0] >= SIDE_SHARE * face.length / 2:
+                keep[max(touch)[1]].append(face)
+    return [_largest(unary_union(keep[i])) if keep[i] else p for i, p in enumerate(cand)]
+
+
+def exact_batch(seed_ll, batch_ll, order, max_width_m=3.0, guard=0.02):
+    """The batch gives way to his parcels and to the batch surveys placed before it, survey by survey in `order`,
+    with exact_seams (no vertex moves). A survey whose area would change by more than `guard` keeps its PDF shape
+    and is returned in `conflicts` with the change in %. Returns (GeoDataFrame EPSG:4326, conflicts)."""
+    fixed = list(seed_ll.geometry)
+    out, conflicts = [], {}
+    for sv in order:
+        part = batch_ll[batch_ll.survey_no == sv]
+        if part.empty:
+            continue
+        plots = list(part.geometry)
+        new = exact_seams(plots, fixed, max_width_m)
+        a0, a1 = sum(p.area for p in plots), sum(p.area for p in new)
+        if abs(a1 / a0 - 1) > guard:
+            conflicts[sv] = 100 * (a1 / a0 - 1)
+            new = plots
+        part = part.copy(); part["geometry"] = new
+        out.append(part)
+        fixed += new
+    res = gpd.GeoDataFrame(pd.concat(out, ignore_index=True), geometry="geometry", crs=4326)
+    allg = list(seed_ll.geometry) + list(res.geometry)
+    geoms = list(res.geometry)
+    for i in range(len(geoms)):
+        others = [g for g in allg if g is not res.geometry.iat[i] and g.distance(geoms[i]) < 1e-8]
+        geoms[i] = insert_nodes(geoms[i], others)
+    res["geometry"] = geoms
+    return res, conflicts
+
+
+def insert_nodes(geom, others, tol=1e-9):
+    """`geom` takes every corner of `others` lying on its own edges (collinear points, shape unchanged), so two
+    parcels meeting along a seam carry the same vertices on it."""
+    if not others:
+        return geom
+    pts = np.unique(np.vstack([shapely.get_coordinates(o) for o in others]), axis=0)
+    ring = [tuple(p) for p in shapely.get_coordinates(geom.exterior)][:-1]
+    have = set(ring)
+    for p in map(tuple, pts):
+        if p in have or geom.exterior.distance(shapely.Point(p)) > tol:
+            continue
+        pt = shapely.Point(p)
+        k = min(range(len(ring)), key=lambda j: shapely.LineString([ring[j], ring[(j + 1) % len(ring)]]).distance(pt))
+        ring.insert(k + 1, p); have.add(p)
+    out = shapely.Polygon(ring)
+    return out if out.is_valid else geom
+
+
 def verify_files(seed_ll, batch_ll):
     """Check 1 (shapely on the written data): overlaps, gaps against neighbours, validity."""
     s = seed_ll.assign(_who="his")

@@ -87,21 +87,10 @@ def cmd_ring(a):
         batch = gpd.GeoDataFrame(pd.concat(placed, ignore_index=True), geometry="geometry", crs=ring.UTM)
         batch["survey_no"] = batch["survey_no"].astype(str)
         rigid_area = batch.groupby("survey_no").geometry.apply(lambda g: unary_union(g.values).area)
-        cleaned, rep = ring_topo.clean_batch(seed_plots.to_crs(ring.UTM), batch, ctx.agreed)
-        cleaned_ll = ring_topo.final_pass(seed_plots, ring_topo.snap_to_seeds(cleaned.to_crs(4326), seed_plots))
-        moved = rep.groupby("survey_no").moved_max_m.max()
-        # guard (rule of 2026-09-21, broken by 72 on 2026-10-07: cut from 14,147 to 4,868 m2): topology may only
-        # close seams; a survey it would change by more than TOPO_GUARD keeps its rigid sheet and is flagged
-        rigid_ll = batch.to_crs(4326)
-        carved = {}
-        for sv in sorted(set(batch.survey_no)):
-            after = unary_union(cleaned_ll[cleaned_ll.survey_no == sv].to_crs(ring.UTM).geometry.values).area
-            if abs(after / rigid_area[sv] - 1) > TOPO_GUARD:
-                carved[sv] = 100 * (after / rigid_area[sv] - 1)
-        if carved:
-            cleaned_ll = pd.concat([cleaned_ll[~cleaned_ll.survey_no.isin(list(carved))],
-                                    rigid_ll[rigid_ll.survey_no.isin(list(carved))]], ignore_index=True)
-            cleaned_ll = gpd.GeoDataFrame(cleaned_ll, geometry="geometry", crs=4326)
+        order = [r["survey"] for r in rows if r["status"] == "placed"]
+        # seams from existing lines only (the vertex-snapping cleaner left steps and spikes, 2026-10-07)
+        cleaned_ll, carved = ring_topo.exact_batch(seed_plots, batch.to_crs(4326), order, max_width_m=3.0, guard=TOPO_GUARD)
+        moved = {}
         for r in rows:
             if r["status"] != "placed":
                 continue
