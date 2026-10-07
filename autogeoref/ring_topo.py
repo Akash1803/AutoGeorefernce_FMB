@@ -63,6 +63,7 @@ def snap_to_seeds(batch_ll, seed_ll):
     return out
 
 
+SEAM_SLIVER_M = 0.6     # a hairline strip between two batch plots (any length) closes into the one it borders most
 MICRO_GAP_M2 = 1.0      # a hole this small between a batch plot and its neighbours joins the batch plot
 
 
@@ -92,17 +93,27 @@ def final_pass(seed_ll, batch_ll):
                 if sum(p.area for p in getattr(x, "geoms", [x]) if p.geom_type == "Polygon") > 0:
                     small, big = (i, j) if g[i].area < g[j].area else (j, i)
                     g[small] = _largest(shapely.difference(g[small], g[big]))
-    U = unary_union(g + sg)
     m2 = 110540.0 * 108600.0
-    for p in getattr(U, "geoms", [U]):
-        for r in p.interiors:
-            h = shapely.Polygon(r).difference(U)
-            if h.is_empty or h.area * m2 > MICRO_GAP_M2:
-                continue
-            touch = [(h.boundary.intersection(g[i].buffer(1e-9)).length, i) for i in range(len(g)) if g[i].distance(h) < 1e-9]
-            if touch:
-                _l, i = max(touch)
-                g[i] = _largest(shapely.union(g[i], h))
+    for _round in range(3):                  # filling one strip can leave a hairline beside it
+        g = [despike(x) for x in g]
+        U = unary_union(g + sg)
+        filled = 0
+        for p in getattr(U, "geoms", [U]):
+            for r in p.interiors:
+                h = shapely.Polygon(r).difference(U)
+                if h.is_empty:
+                    continue
+                width_m = 2 * h.area * m2 / max(h.length * 110000.0, 1e-9)
+                between_batch_only = not any(x.distance(h) < 1e-9 for x in sg)
+                if h.area * m2 > MICRO_GAP_M2 and not (between_batch_only and width_m <= SEAM_SLIVER_M):
+                    continue                    # real open ground, or a gap against his parcels: left for him
+                touch = [(h.boundary.intersection(g[i].buffer(1e-9)).length, i) for i in range(len(g)) if g[i].distance(h) < 1e-9]
+                if touch:
+                    _l, i = max(touch)
+                    g[i] = _largest(shapely.union(g[i], h))
+                    filled += 1
+        if not filled:
+            break
     b["geometry"] = [despike(x) for x in g]
     return b
 

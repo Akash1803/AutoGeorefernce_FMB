@@ -118,6 +118,8 @@ class Context:
         self.printed = printed_numbers.printed_sets(table)
         self.agreed = printed_numbers.agreed_sets(table)
         self.seed_ids = set(map(str, seed_ids))
+        self.poses = {}                     # survey -> (theta, t) of its sheet on the ground, where known
+        self.outlines = {}                  # survey -> sheet outline Polygon (sheet metres)
         self._rebuild()
 
     def _rebuild(self):
@@ -143,8 +145,10 @@ class Context:
                     out.append((x, y))
         return np.unique(np.round(np.array(out), 2), axis=0) if out else np.zeros((0, 2))
 
-    def add(self, survey, geom):
+    def add(self, survey, geom, pose=None):
         self.placed[str(survey)] = geom
+        if pose is not None:
+            self.poses[str(survey)] = pose
         self._rebuild()
 
     def rail(self):
@@ -256,6 +260,24 @@ def evaluate(sheet, theta, t, ctx):
                             sheet.polygon.exterior.distance(Point(L.x, L.y))) for L in labs)
             if d > LABEL_NEAR_M + reach:
                 m["label_far"].append("%s %.0f m away" % (n, d))
+    me = sheet.survey.upper()
+    for n, (pth, pt_) in ctx.poses.items():
+        labs = [L for L in ctx.table.get(n, []) if L.number == me]
+        if not labs or n not in ctx.placed:
+            continue
+        reach = getattr(ctx, "_reach", {}).get(n)
+        if reach is None:
+            ctx._reach = getattr(ctx, "_reach", {})
+            reach = ctx._reach[n] = {}
+        best = None
+        for L in labs:
+            if (L.x, L.y) not in reach:
+                outline = ctx.outlines.get(n)
+                reach[(L.x, L.y)] = outline.exterior.distance(Point(L.x, L.y)) if outline is not None else 0.0
+            d = G.distance(Point(*pose_points([(L.x, L.y)], pth, pt_)[0]))
+            best = d - reach[(L.x, L.y)] if best is None else min(best, d - reach[(L.x, L.y)])
+        if best is not None and best > LABEL_NEAR_M:
+            m["label_far"].append("%s's sheet puts %s %.0f m away" % (n, sheet.survey, best + 0))
     near = [k for k in ctx.tree.query(G.buffer(SUPPORT_M + 1))]
     if near:
         U = unary_union([ctx.geoms[k] for k in near])
@@ -396,7 +418,7 @@ def decide(sheet, ctx):
     if not named:
         return Decision(sheet.survey, "ask", "no placed parcel names it and is named by it")
     outline = np.asarray(sheet.outline)
-    cands, seen = [], set()
+    cands, seen, why = [], set(), {}
     for n in named:
         for th, t, src in candidate_poses(sheet, ctx, n):
             key = (round(th % 360, 1), round(float(t[0]), 1), round(float(t[1]), 1))
@@ -408,9 +430,16 @@ def decide(sheet, ctx):
             m = evaluate(sheet, th, t, ctx)
             if m["valid"]:
                 cands.append({"theta": th, "t": t, "m": m, "src": src, "outline": outline})
+            else:
+                if m["overlap"] > MAX_OVERLAP:
+                    why["overlaps a placed parcel"] = why.get("overlaps a placed parcel", 0) + 1
+                for x in m["label_conflicts"][:1] + m["label_far"][:1]:
+                    why[x.split(" lands")[0] + (" lands in the wrong parcel" if " lands" in x else "")] = why.get(x, 0) + 1
+                for x in list(m["contra"])[:1]:
+                    why["runs along %s (not a neighbour)" % x] = why.get("runs along %s (not a neighbour)" % x, 0) + 1
     if not cands:
-        return Decision(sheet.survey, "ask", "no position fits: every pose overlaps a placed parcel, puts a printed "
-                                             "number in the wrong parcel or runs along a parcel neither sheet names",
+        top = sorted(why.items(), key=lambda kv: -kv[1])[:3]
+        return Decision(sheet.survey, "ask", "no position fits (%s)" % "; ".join("%s x%d" % kv for kv in top),
                         metrics={"named_placed": ",".join(named)})
     # every distinct pose is pulled onto the named neighbours' lines before they are compared: a pose
     # 3 m off the right one shares little boundary until it is refined (68B, 2026-10-07)
@@ -497,7 +526,7 @@ def seed_rotations(village, seeds, table):
         ch = chains[0]
         th, _t, rms, _mx = fit.rigid_fit([a for a, _b in ch.pairs], [b for _a, b in ch.pairs])
         if rms <= 5.0 and ch.n_pairs >= 3:
-            out[s] = ((th + 180) % 360) - 180
+            out[s] = (((th + 180) % 360) - 180, np.asarray(_t))
     return out
 
 
@@ -505,7 +534,11 @@ def place_ring(village, seeds, table, size=8, ring=None, log=print, in_order=Fal
     """Greedy: place the sheet with the clearest win, add it to the placed set, repeat. With in_order the
     sheets are placed one by one in the order given (rail strips first, Akash's rule of 2026-09-23)."""
     ctx = Context(seeds, table, seeds.keys())
-    rots = seed_rotations(village, seeds, table)
+    seed_poses = seed_rotations(village, seeds, table)
+    ctx.poses.update(seed_poses)
+    for k in seed_poses:
+        ctx.outlines[k] = load_sheet(village, k, table).polygon
+    rots = {k: v[0] for k, v in seed_poses.items()}
     if len(rots) >= 2:
         v = np.array(list(rots.values()))
         med = float(np.degrees(np.arctan2(np.sin(np.radians(v)).mean(), np.cos(np.radians(v)).mean())))
@@ -517,6 +550,8 @@ def place_ring(village, seeds, table, size=8, ring=None, log=print, in_order=Fal
     ring = ring or next_ring(ctx, available, size)
     log("ring: %s" % ", ".join(ring))
     sheet_objs = {s: load_sheet(village, s, table) for s in ring}
+    for k, sh_ in sheet_objs.items():
+        ctx.outlines[k] = sh_.polygon
     pending, done = list(ring), {}
     if in_order:
         for s_ in ring:
@@ -525,7 +560,7 @@ def place_ring(village, seeds, table, size=8, ring=None, log=print, in_order=Fal
                 log("placed %-5s support %5.0f m (%s) runner-up %.2f from %s %s" % (
                     d.survey, d.metrics["support_m"], d.metrics["support_by"], d.metrics["runner_up_ratio"],
                     d.metrics["pose_from"], ("| " + d.reason) if d.reason else ""))
-                ctx.add(d.survey, ground_polygon(sheet_objs[d.survey], d.theta, d.t))
+                ctx.add(d.survey, ground_polygon(sheet_objs[d.survey], d.theta, d.t), (d.theta, np.asarray(d.t)))
             done[s_] = d
         pending = []
     while pending:
@@ -538,7 +573,7 @@ def place_ring(village, seeds, table, size=8, ring=None, log=print, in_order=Fal
         d = max(ok, key=lambda d: (d.metrics["support_m"] * (1 - d.metrics["runner_up_ratio"])))
         log("placed %-5s support %5.0f m (%s) runner-up %.2f from %s" % (
             d.survey, d.metrics["support_m"], d.metrics["support_by"], d.metrics["runner_up_ratio"], d.metrics["pose_from"]))
-        ctx.add(d.survey, ground_polygon(sheet_objs[d.survey], d.theta, d.t))
+        ctx.add(d.survey, ground_polygon(sheet_objs[d.survey], d.theta, d.t), (d.theta, np.asarray(d.t)))
         done[d.survey] = d
         pending.remove(d.survey)
     for s in ring:
