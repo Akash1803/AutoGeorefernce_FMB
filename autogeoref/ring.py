@@ -43,8 +43,10 @@ RUNNER_UP = 0.80            # the best pose must beat every distinct pose by thi
 CLUSTER_M = 4.0             # poses whose corners all land within this are one answer (hand work differs 1-4 m)
 CROSS_DEG = 25.0            # support in two directions this far apart pins the position along an edge
 REFINE_ROUNDS = 3
-ROT_WINDOW_DEG = 10.0        # a pose may turn this much (+ the seeds' own spread) from the seeds' heading
+STRIP_ELONGATION = 5.0      # length / width beyond which a sheet is treated as a strip (rail, road)
+ROT_WINDOW_DEG = 25.0        # a pose may turn this much (+ the seeds' own spread) from the seeds' heading
 REFINE_TOP = 8               # distinct poses refined before the best is chosen
+JUNCTION_REACH_M = 6.0      # a sheet corner this close to a junction of two placed parcels is pinned to it
 REFINE_REACH_M = 2.5        # outline samples this close to a named neighbour pull onto its line
 
 
@@ -124,10 +126,35 @@ class Context:
         self.tree = shapely.STRtree(self.geoms)
         self.union = unary_union(self.geoms)
         self.free_boundary = self.union.boundary
+        self.junctions = self._junctions()
+
+    def _junctions(self):
+        """Corners on the outer boundary of the placed parcels where two of them meet: where a new sheet's
+        corner must land (582's frontage corners in the Thirukatchur batches)."""
+        out = []
+        for i, g in enumerate(self.geoms):
+            for x, y in shapely.get_coordinates(g.boundary):
+                pt = Point(x, y)
+                if self.free_boundary.distance(pt) > 0.2:
+                    continue
+                owners = {self.ids[k] for k in self.tree.query(pt.buffer(0.5))
+                          if self.geoms[k].boundary.distance(pt) < 0.5}
+                if len(owners) >= 2:
+                    out.append((x, y))
+        return np.unique(np.round(np.array(out), 2), axis=0) if out else np.zeros((0, 2))
 
     def add(self, survey, geom):
         self.placed[str(survey)] = geom
         self._rebuild()
+
+    def rail(self):
+        if not hasattr(self, "_rail"):
+            try:
+                r = gpd.read_file(paths.RAIL_GPKG, layer=paths.RAIL_LAYER).to_crs(UTM)
+                self._rail = unary_union(r.geometry.values)
+            except Exception:
+                self._rail = None
+        return self._rail
 
     def set_rotation(self, theta, spread):
         """The village's sheets are drawn near one heading (Paranur: -12..0 deg on all 12 hand-placed
@@ -269,7 +296,7 @@ def _two_directions(dirs, min_m=5.0):
     return float((off >= CROSS_DEG).sum()) * SAMPLE_M >= min_m
 
 
-def refine(sheet, theta, t, ctx, neighbours_):
+def refine(sheet, theta, t, ctx, neighbours_, heading=None):
     """Rigid least squares: every outline sample near a named neighbour onto that neighbour's line."""
     for _ in range(REFINE_ROUNDS):
         G_pts, _b = _samples(pose_points(sheet.outline, theta, t), 1.0)
@@ -286,10 +313,19 @@ def refine(sheet, theta, t, ctx, neighbours_):
                 if seg is None:
                     continue
                 obs.append(match.LineObs(sheet.survey, (float(pl[0]), float(pl[1])), seg, 0.5, float(b.distance(pt))))
-        if len(obs) < 3:
+        gcps = []
+        if len(ctx.junctions):
+            V = pose_points(sheet.outline, theta, t)
+            for pl, pg in zip(sheet.outline, V):
+                d = np.linalg.norm(ctx.junctions - pg, axis=1)
+                k = int(np.argmin(d))
+                if d[k] <= JUNCTION_REACH_M:
+                    gcps.append(fit.GcpObs(sheet.survey, tuple(pl), tuple(ctx.junctions[k]), 0.7))
+        if len(obs) + 2 * len(gcps) < 3:
             break
-        prior = fit.PosePrior(sheet.survey, theta, tuple(t), 3.0, 3.0)
-        sol = fit.block_adjust({sheet.survey: (theta, tuple(t))}, {}, [], obs, [], [prior])[sheet.survey]
+        prior = (fit.PosePrior(sheet.survey, heading, tuple(t), 50.0, 0.3) if heading is not None
+                 else fit.PosePrior(sheet.survey, theta, tuple(t), 3.0, 3.0))
+        sol = fit.block_adjust({sheet.survey: (theta, tuple(t))}, {}, [], obs, gcps, [prior])[sheet.survey]
         theta, t = sol["theta"], np.asarray(sol["t"])
     return theta, t
 
@@ -305,6 +341,37 @@ def _segment_at(boundary, q):
             if best is None or d < best[0]:
                 best = (d, (c[k], c[k + 1]))
     return best[1] if best else None
+
+
+def _axis_bearing(pts):
+    """Direction (degrees, 0..180) of the main axis of a point set."""
+    P = np.asarray(pts, float) - np.mean(pts, axis=0)
+    _u, _s, vt = np.linalg.svd(P, full_matrices=False)
+    return math.degrees(math.atan2(vt[0][1], vt[0][0])) % 180.0
+
+
+def elongation(sheet):
+    r = sheet.polygon.minimum_rotated_rectangle
+    c = list(r.exterior.coords)
+    a, b = math.dist(c[0], c[1]), math.dist(c[1], c[2])
+    return max(a, b) / max(min(a, b), 1e-6)
+
+
+def track_aligned(sheet, theta, t, ctx):
+    """For a rail strip: the heading that makes the strip's long axis run along the track near it,
+    or None when the track does not run through the strip (Akash: rail strips sit on the track)."""
+    rail = ctx.rail()
+    if rail is None or elongation(sheet) < STRIP_ELONGATION:
+        return None
+    G = ground_polygon(sheet, theta, t)
+    inside = rail.intersection(G.buffer(10))
+    if inside.is_empty or inside.length < 0.3 * math.sqrt(G.area * elongation(sheet)):
+        return None
+    tp = shapely.get_coordinates(inside.segmentize(5.0))
+    if len(tp) < 3:
+        return None
+    d = (_axis_bearing(tp) - _axis_bearing(list(G.exterior.coords)[:-1]) + 90) % 180 - 90
+    return theta + d
 
 
 def _cluster(cands):
@@ -355,6 +422,25 @@ def decide(sheet, ctx):
             refined.append(dict(c, theta=th, t=np.asarray(t), m=m))
         else:
             refined.append(c)
+    # a rail strip is turned to run along the track, then pulled onto its neighbours again
+    if elongation(sheet) >= STRIP_ELONGATION:
+        for k, c in enumerate(refined):
+            th_t = track_aligned(sheet, c["theta"], c["t"], ctx)
+            if th_t is None:
+                continue
+            pin = np.mean(pose_points(sheet.outline, c["theta"], c["t"]), axis=0)
+            if c["m"]["support"]:                     # turn about the stretch it shares with its neighbours
+                G = ground_polygon(sheet, c["theta"], c["t"])
+                shared = G.exterior.intersection(unary_union([ctx.placed[n] for n in c["m"]["support"]]).buffer(SUPPORT_M))
+                if not shared.is_empty:
+                    pin = np.asarray(shared.centroid.coords[0])
+            th2 = th_t                                   # rotate the pose about `pin`
+            local_pin = fit.unapply_pose([pin], c["theta"], c["t"])[0]
+            t2 = pin - fit.transform_points([local_pin], th2, (0.0, 0.0))[0]
+            th3, t3 = refine(sheet, th2, t2, ctx, named, heading=th2)
+            m3 = evaluate(sheet, th3, t3, ctx)
+            if m3["valid"]:
+                refined[k] = dict(c, theta=th3, t=np.asarray(t3), m=m3, src=c["src"] + " + along the track")
     clusters = _cluster(refined)
     best = clusters[0]
     th, t, m = best["theta"], best["t"], best["m"]
@@ -366,19 +452,21 @@ def decide(sheet, ctx):
                "runner_up_ratio": round(ratio, 2), "two_directions": m["two_dirs"],
                "overlap_share": round(m["overlap"], 4), "labels_far": "; ".join(m["label_far"]),
                "candidates": len(cands), "pose_from": best["src"], "named_placed": ",".join(named)}
+    notes = []
     if m["total"] < MIN_SUPPORT_M:
-        return Decision(sheet.survey, "ask", "only %.0f m of boundary shared with named parcels" % m["total"], th, tuple(t), metrics, options)
+        notes.append("only %.0f m shared with your parcels" % m["total"])
     if ratio >= RUNNER_UP:
-        alt = clusters[1]
-        return Decision(sheet.survey, "ask", "two positions fit almost equally (%.0f vs %.0f m shared; %s)"
-                        % (m["total"], runner, alt["src"]), th, tuple(t), metrics, options)
+        notes.append("a position %.0f m away fits nearly as well (%.0f vs %.0f m shared)" % (
+            _pose_gap(sheet, best, clusters[1]), m["total"], runner))
     if not m["two_dirs"] and "chain" not in best["src"]:
-        return Decision(sheet.survey, "ask", "shares one straight edge only: its position along that edge is not fixed",
-                        th, tuple(t), metrics, options)
-    if m["label_far"]:
-        return Decision(sheet.survey, "ask", "printed neighbour number lands away from that neighbour (%s)"
-                        % "; ".join(m["label_far"]), th, tuple(t), metrics, options)
-    return Decision(sheet.survey, "placed", "", th, tuple(t), metrics, options)
+        notes.append("touches your parcels along one straight line: its position along it is the weakest part")
+    metrics["confidence"] = "check" if notes else "good"
+    return Decision(sheet.survey, "placed", "; ".join(notes), th, tuple(t), metrics, options)
+
+
+def _pose_gap(sheet, a, b):
+    return float(np.max(np.linalg.norm(pose_points(sheet.outline, a["theta"], a["t"])
+                                       - pose_points(sheet.outline, b["theta"], b["t"]), axis=1)))
 
 
 # --------------------------------------------------------------------------- the ring
@@ -413,8 +501,9 @@ def seed_rotations(village, seeds, table):
     return out
 
 
-def place_ring(village, seeds, table, size=8, ring=None, log=print):
-    """Greedy: place the sheet with the clearest win, add it to the placed set, repeat."""
+def place_ring(village, seeds, table, size=8, ring=None, log=print, in_order=False):
+    """Greedy: place the sheet with the clearest win, add it to the placed set, repeat. With in_order the
+    sheets are placed one by one in the order given (rail strips first, Akash's rule of 2026-09-23)."""
     ctx = Context(seeds, table, seeds.keys())
     rots = seed_rotations(village, seeds, table)
     if len(rots) >= 2:
@@ -429,6 +518,16 @@ def place_ring(village, seeds, table, size=8, ring=None, log=print):
     log("ring: %s" % ", ".join(ring))
     sheet_objs = {s: load_sheet(village, s, table) for s in ring}
     pending, done = list(ring), {}
+    if in_order:
+        for s_ in ring:
+            d = decide(sheet_objs[s_], ctx)
+            if d.status == "placed":
+                log("placed %-5s support %5.0f m (%s) runner-up %.2f from %s %s" % (
+                    d.survey, d.metrics["support_m"], d.metrics["support_by"], d.metrics["runner_up_ratio"],
+                    d.metrics["pose_from"], ("| " + d.reason) if d.reason else ""))
+                ctx.add(d.survey, ground_polygon(sheet_objs[d.survey], d.theta, d.t))
+            done[s_] = d
+        pending = []
     while pending:
         decisions = {s: decide(sheet_objs[s], ctx) for s in pending}
         ok = [d for d in decisions.values() if d.status == "placed"]

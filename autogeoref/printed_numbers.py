@@ -186,6 +186,41 @@ def read_labels(pdf_path, scale):
     return out
 
 
+def read_header_area(pdf_path):
+    """The area printed in the title block ("Area : Hect 01 Ares 2.50") in m2, or None.
+
+    The right-hand block has three lines (Survey No / Area / Scale); the Area line's digit runs are
+    hectares, ares and the ares decimals (the decimal point is too small to be a glyph, so it splits
+    the run)."""
+    import pdfplumber
+    page = pdfplumber.open(str(pdf_path)).pages[0]
+    H, W = float(page.height), float(page.width)
+    gl = [g for g in _glyphs(_black_curves(page)) if g["cy"] < HEADER_SHARE * H and g["x0"] > 0.5 * W]
+    if not gl:
+        return None
+    lines = []
+    for g in sorted(gl, key=lambda g: g["cy"]):
+        if lines and abs(g["cy"] - lines[-1][-1]["cy"]) < 0.5 * g["h"]:
+            lines[-1].append(g)
+        else:
+            lines.append([g])
+    lines = [ln for ln in lines if len(ln) >= 3]
+    if len(lines) != 3:
+        return None
+    area_line = lines[1]
+    runs = _runs(area_line)
+    nums = []
+    for run in sorted(runs, key=lambda r: min(area_line[k]["x0"] for k in r)):
+        txt, worst = _read(area_line, run)
+        if txt.isdigit() and worst <= MAX_HAMMING:
+            nums.append(txt)
+    if len(nums) == 3:
+        return int(nums[0]) * 10000 + float(nums[1] + "." + nums[2]) * 100
+    if len(nums) == 2:
+        return int(nums[0]) * 10000 + int(nums[1]) * 100
+    return None
+
+
 def sheet_scale(village, survey):
     f = paths.sheet_path(village, survey)
     props = json.loads(f.read_text(encoding="utf-8"))["features"][0]["properties"]

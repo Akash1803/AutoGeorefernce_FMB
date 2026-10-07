@@ -51,20 +51,23 @@ def _read_source(source):
 
 
 def load_seeds(village_name, crs=32644):
-    """{survey: dissolved polygon in UTM} for every hand / approved layer of the village group."""
-    seeds, sources = {}, {}
+    """({survey: dissolved polygon in UTM}, {survey: source}, plots GeoDataFrame in EPSG:4326 with survey_no)
+    for every hand / approved layer of the village group."""
+    seeds, sources, plots = {}, {}, []
     for L in village_layers(village_name):
         name = L["name"]
         if "_parcels" not in name or name.endswith("_parcels_auto"):
             continue
         survey = name.split("_parcels")[0]
         g = _read_source(L["source"])
-        g = g[g.geometry.notna() & ~g.geometry.is_empty].to_crs(crs)
+        g = g[g.geometry.notna() & ~g.geometry.is_empty]
         if g.empty:
             continue
-        seeds[survey] = unary_union(g.geometry.buffer(0).values)
+        plots.append(gpd.GeoDataFrame({"survey_no": [survey] * len(g)}, geometry=g.to_crs(4326).geometry.values, crs=4326))
+        seeds[survey] = unary_union(g.to_crs(crs).geometry.buffer(0).values)
         sources[survey] = L["source"]
-    return seeds, sources
+    plots = gpd.GeoDataFrame(pd.concat(plots, ignore_index=True), geometry="geometry", crs=4326) if plots else None
+    return seeds, sources, plots
 
 
 def batch_dir(village):
@@ -84,7 +87,7 @@ def output_path(village, survey):
 def write_survey(village, survey, gdf_utm):
     """The placed plots as FMB_Vector/<v>/<s>_parcels_auto.gpkg, layer 'parcels', EPSG:4326."""
     out = output_path(village, survey)
-    out_gdf = gdf_utm.to_crs(4326)
+    out_gdf = gdf_utm if gdf_utm.crs and gdf_utm.crs.to_epsg() == 4326 else gdf_utm.to_crs(4326)   # no round trip
     if out.exists():
         os.remove(out)
     out_gdf.to_file(out, layer="parcels", driver="GPKG")
@@ -108,7 +111,14 @@ for survey, path in %(files)r:
     L = QgsVectorLayer(path + "|layername=parcels", name, "ogr")
     if not L.isValid():
         done.append([survey, "invalid"]); continue
-    L.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(%(red)r)))
+    red = dict(%(red)r)
+    hand = [n.layer() for n in sub.findLayers() if n.layer() is not None and not n.layer().name().endswith("_auto")
+            and "_parcels" in n.layer().name()]
+    if hand:                                       # same line width as his own layers (rule of 2026-09-20)
+        sl = hand[0].renderer().symbol().symbolLayer(0).properties()
+        red["outline_width"] = sl.get("outline_width", red["outline_width"])
+        red["outline_width_unit"] = sl.get("outline_width_unit", "MM")
+    L.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(red)))
     P.addMapLayer(L, False); sub.insertLayer(0, L)
     done.append([survey, L.featureCount()])
 print(json.dumps(done))
@@ -160,9 +170,15 @@ import gc, os
 from qgis.core import QgsApplication
 gc.collect(); QgsApplication.processEvents()          # QGIS keeps the GeoPackage open until then
 kept = {n.split("_parcels")[0] for n in out["kept"]}
+import time
 for s, p in %r:
-    if s not in kept and os.path.exists(p):
-        os.remove(p)
+    for attempt in range(10):                       # the OGR connection pool lets go after a moment
+        if s in kept or not os.path.exists(p):
+            break
+        try:
+            os.remove(p)
+        except PermissionError:
+            gc.collect(); QgsApplication.processEvents(); time.sleep(0.5)
 print(json.dumps(out))
 """ % (list(surveys), village.lower(), [(s, str(output_path(village, s))) for s in surveys])
     return qgis_bridge.json_result(code)
