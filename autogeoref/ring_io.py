@@ -50,13 +50,13 @@ def _read_source(source):
     return gpd.read_file(path, layer=layer) if layer else gpd.read_file(path)
 
 
-def load_seeds(village_name, crs=32644):
+def load_seeds(village_name, crs=32644, include_red=False):
     """({survey: dissolved polygon in UTM}, {survey: source}, plots GeoDataFrame in EPSG:4326 with survey_no)
     for every hand / approved layer of the village group."""
     seeds, sources, plots = {}, {}, []
     for L in village_layers(village_name):
         name = L["name"]
-        if "_parcels" not in name or name.endswith("_parcels_auto"):
+        if "_parcels" not in name or (name.endswith("_parcels_auto") and not include_red):
             continue
         survey = name.split("_parcels")[0]
         g = _read_source(L["source"])

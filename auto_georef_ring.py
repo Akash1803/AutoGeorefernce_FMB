@@ -49,10 +49,18 @@ def pdf_check(village, sheet):
     return out
 
 
+def wanted_list(a):
+    return [x.strip() for x in a.surveys.split(",")] if a.surveys else []
+
+
 def cmd_ring(a):
     t0 = time.time()
     vname = village_name(a.village)
-    seeds, sources, seed_plots = ring_io.load_seeds(vname)
+    seeds, sources, seed_plots = ring_io.load_seeds(vname, include_red=a.build_on_red)
+    if a.build_on_red and wanted_list(a):
+        for s_ in wanted_list(a):                    # the sheets being re-placed are not their own ground
+            seeds.pop(s_, None); sources.pop(s_, None)
+        seed_plots = seed_plots[~seed_plots.survey_no.isin(wanted_list(a))]
     if not seeds:
         sys.exit("no placed parcels in QGIS group Manual_Georeferenced/%s" % ring_io.group_name(vname))
     print("%s: %d placed surveys in QGIS (%s)" % (vname, len(seeds), ", ".join(sorted(seeds, key=paths.survey_sort_key))))
@@ -145,6 +153,7 @@ def main(argv=None):
     r.add_argument("--size", type=int, default=3)
     r.add_argument("--surveys", help="place exactly these surveys (comma separated)")
     r.add_argument("--in-order", action="store_true", help="place one by one in the order given")
+    r.add_argument("--build-on-red", action="store_true", help="red (not yet approved) parcels of earlier batches count as placed")
     r.add_argument("--no-qgis", action="store_true")
     r.add_argument("--no-satellite", action="store_true", help="skip the Google Satellite check")
     r.set_defaults(fn=cmd_ring)
