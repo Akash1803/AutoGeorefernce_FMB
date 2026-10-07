@@ -19,6 +19,8 @@ from shapely.ops import unary_union
 
 from autogeoref import paths, printed_numbers, ring, ring_io, ring_topo
 
+TOPO_GUARD = 0.02          # topology may change a survey's area by at most 2 %
+
 
 def village_name(village):
     s = paths.surveys_with_sheets(village)[0]
@@ -80,12 +82,29 @@ def cmd_ring(a):
         cleaned, rep = ring_topo.clean_batch(seed_plots.to_crs(ring.UTM), batch, ctx.agreed)
         cleaned_ll = ring_topo.final_pass(seed_plots, ring_topo.snap_to_seeds(cleaned.to_crs(4326), seed_plots))
         moved = rep.groupby("survey_no").moved_max_m.max()
+        # guard (rule of 2026-09-21, broken by 72 on 2026-10-07: cut from 14,147 to 4,868 m2): topology may only
+        # close seams; a survey it would change by more than TOPO_GUARD keeps its rigid sheet and is flagged
+        rigid_ll = batch.to_crs(4326)
+        carved = {}
+        for sv in sorted(set(batch.survey_no)):
+            after = unary_union(cleaned_ll[cleaned_ll.survey_no == sv].to_crs(ring.UTM).geometry.values).area
+            if abs(after / rigid_area[sv] - 1) > TOPO_GUARD:
+                carved[sv] = 100 * (after / rigid_area[sv] - 1)
+        if carved:
+            cleaned_ll = pd.concat([cleaned_ll[~cleaned_ll.survey_no.isin(list(carved))],
+                                    rigid_ll[rigid_ll.survey_no.isin(list(carved))]], ignore_index=True)
+            cleaned_ll = gpd.GeoDataFrame(cleaned_ll, geometry="geometry", crs=4326)
         for r in rows:
             if r["status"] != "placed":
                 continue
             part = cleaned_ll[cleaned_ll.survey_no == r["survey"]]
             area_after = unary_union(part.to_crs(ring.UTM).geometry.values).area
             r["topology_max_move_m"] = float(moved.get(r["survey"], 0.0))
+            if r["survey"] in carved:
+                r["topology_max_move_m"] = 0.0
+                r["note"] = ("topology would change it by %.0f %%: it overlaps its neighbours, so its position is wrong "
+                             "somewhere - left as the rigid sheet for you to see; " % carved[r["survey"]]) + (r.get("note") or "")
+                r["confidence"] = "conflict"
             r["area_change_by_topology_m2"] = round(area_after - rigid_area[r["survey"]], 1)
             files.append((r["survey"], ring_io.write_survey(a.village, r["survey"], part)))
         written = gpd.GeoDataFrame(pd.concat([gpd.read_file(p, layer="parcels") for _s, p in files], ignore_index=True),
