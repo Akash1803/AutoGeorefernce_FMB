@@ -191,9 +191,7 @@ for n in sub.findLayers():
     if L is None or "_parcels" not in L.name():
         continue
     s = L.name().split("_parcels")[0]
-    is_auto = L.name().endswith("_parcels_auto")
-    if is_auto and s not in batch:
-        continue
+    is_auto = L.name().endswith("_parcels_auto") and s in batch     # other red layers are neighbours like his
     for f in L.getFeatures():
         g = QgsGeometry(f.geometry())
         if g.isEmpty():

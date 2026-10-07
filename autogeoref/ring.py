@@ -244,12 +244,12 @@ def evaluate(sheet, theta, t, ctx):
                 continue
             # a number printed beyond a narrow neighbour (a 17 m rail strip) lands in the parcel behind it
             named = next((x for x in ctx.ids if x.upper() == L.number), None)
+            reach = sheet.polygon.exterior.distance(Point(L.x, L.y))
             if named is not None:
-                reach = sheet.polygon.exterior.distance(Point(L.x, L.y))
                 if ctx.placed[named].distance(pt) <= LABEL_NEAR_M + reach:
                     continue
-            elif ctx.geoms[k].boundary.distance(pt) <= LABEL_DEPTH_M:
-                continue
+            elif ctx.geoms[k].boundary.distance(pt) <= LABEL_DEPTH_M + reach:
+                continue        # an unplaced neighbour's number printed far out (72's "71/A" lands in 70A)
             m["label_conflicts"].append("%s lands in %s" % (L.text, owner))
     for n in ctx.ids:
         if ctx.named(sheet.survey, n) != "agreed":
