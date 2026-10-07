@@ -192,6 +192,8 @@ for n in sub.findLayers():
         continue
     s = L.name().split("_parcels")[0]
     is_auto = L.name().endswith("_parcels_auto") and s in batch     # other red layers are neighbours like his
+    if not L.name().endswith("_parcels_auto") and s in batch:
+        continue                           # his own version of a survey being re-placed: the red one replaces it here
     for f in L.getFeatures():
         g = QgsGeometry(f.geometry())
         if g.isEmpty():
@@ -209,8 +211,8 @@ for i, (s, a, g) in enumerate(feats):
     if not g.isGeosValid() or g.isMultipart():
         bad.append(s)
     for j in idx.intersects(g.boundingBox()):
-        if j == i or (feats[j][1] and j < i):
-            continue
+        if j == i or (feats[j][1] and j < i) or feats[j][0] == s:
+            continue                       # the same survey (e.g. his version beside a re-placed one) is not an overlap
         x = g.intersection(feats[j][2])
         if x and not x.isEmpty() and x.area() > 0:
             ov.append([s, feats[j][0], round(x.area() * K2, 4)])
