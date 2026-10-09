@@ -113,6 +113,12 @@ def seg_x(p1, p2, p3, p4):
 # ----------------------------------------------------------------------------
 # line extraction + classification
 # ----------------------------------------------------------------------------
+def _ends(ln):
+    """First and last point of a pdfplumber line; ops without a point (closepath 'h') are skipped."""
+    pts = [t[-1] for t in ln['path'] if len(t) > 1]
+    return pts[0], pts[-1]
+
+
 def is_furniture(ln, W, H):
     """True if the line is page border / title-block, by frame geometry.
 
@@ -121,7 +127,7 @@ def is_furniture(ln, W, H):
     overflow the page, so neither length nor edge-proximity alone is safe.
     Thresholds scale with sheet height so A0 and A4 prints behave the same.
     """
-    (x0, y0) = ln['path'][0][1]; (x1, y1) = ln['path'][-1][1]
+    (x0, y0), (x1, y1) = _ends(ln)
     col = tuple(round(c, 3) for c in (ln.get('stroking_color') or (0, 0, 0)))
     if col not in ((0.0, 0.0, 0.0), (0.0, 0.0, 1.0)):
         return True                                    # grey frame strokes
@@ -173,7 +179,7 @@ def extract_lines(page, clip=None):
     for ln in page.lines:
         if is_furniture(ln, W, H):
             continue
-        (x0, yt0) = ln['path'][0][1]; (x1, yt1) = ln['path'][-1][1]
+        (x0, yt0), (x1, yt1) = _ends(ln)
         if math.hypot(x1 - x0, yt1 - yt0) < 1e-6:
             continue
         if clip is not None and not (inclip(x0, yt0) and inclip(x1, yt1)):

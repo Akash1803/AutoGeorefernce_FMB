@@ -71,3 +71,11 @@ def test_drop_arrows_keeps_a_boundary_corner_with_a_short_side():
              _seg((100, 0), (100, 50), "survey_boundary_main")]
     kept, dropped = F.drop_arrows(lines, tol)
     assert dropped == []
+
+
+def test_line_with_a_closepath_op_is_read_by_its_points():
+    # sheets fetched on 2026-10-09 carry lines whose path ends with a bare closepath ('h',)
+    H, W = F.A0_H, 2383.0
+    ln = {"path": [("m", (900.0, 1000.0)), ("l", (900.0, 1600.0)), ("h",)], "stroking_color": (0, 0, 0), "linewidth": 2.0}
+    assert F.is_furniture(ln, W, H) is False
+    assert F._ends(ln) == ((900.0, 1000.0), (900.0, 1600.0))
