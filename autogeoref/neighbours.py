@@ -23,12 +23,16 @@ def load(village):
 
 
 def normalise(number):
-    """'103/5A' -> '103'; 'V.No. 74 ...' -> None (an adjoining village, not a survey)."""
+    """'103/5A' -> '103' (a plot inside 103); '569/C' -> '569C' (the portal's subdivision letter);
+    'V.No. 74 ...' -> None (an adjoining village, not a survey)."""
     s = str(number).upper().strip()
     if "V.NO" in s or "VILLAGE" in s:
         return None
-    s = re.sub(r"^S\.?\s*NO\.?\s*", "", s).replace(" ", "").split("/")[0]
-    return s if re.fullmatch(r"\d+[A-Z]?", s) else None
+    s = re.sub(r"^S\.?\s*NO\.?\s*", "", s).replace(" ", "")
+    head, _, tail = s.partition("/")
+    if tail and re.fullmatch(r"[A-Z]", tail):
+        head += tail                        # 569/C is survey 569C, as the portal names it
+    return head if re.fullmatch(r"\d+[A-Z]?", head) else None
 
 
 def printed(village, survey):

@@ -22,7 +22,7 @@ from shapely.geometry import Point
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
-from . import anchors, config as configmod, fit, paths, sheets
+from . import anchors, config as configmod, fit, paths, sheets, visible
 
 log = logging.getLogger(__name__)
 
@@ -141,6 +141,13 @@ def disputed_reasons(village: str, survey: str) -> List[str]:
             for r in csv.DictReader(fh):
                 if r.get("survey") == survey:
                     reasons.append(r.get("reason") or "listed in disputed.csv")
+    corrections = paths.vector_dir(village) / "sheet_corrections.csv"
+    if corrections.exists():
+        with corrections.open(encoding="utf-8") as fh:
+            for r in csv.DictReader(fh):
+                if r.get("survey") == survey and (r.get("edge") or "") != "plots":
+                    reasons.append("outline corrected by hand (sheet_corrections.csv, verified_by=%s)"
+                                   % (r.get("verified_by") or "unverified"))
     return reasons
 
 
@@ -158,7 +165,7 @@ def reference_for(village: str, survey: str, cfg: Optional[configmod.Config] = N
     theta, t, rms, _scale, _aniso, n = pose
     sheet = sheets.load_sheet(village, survey)
     geom_fmb = sheets.dissolve([(None, fit.apply_pose(g, theta, t)) for _p, g in sheet])
-    hand_gdf = gpd.read_file(hand[0])
+    hand_gdf = visible.read_hand(hand[0])
     if hand_gdf.crs is not None and hand_gdf.crs.to_epsg() != 32644:
         hand_gdf = hand_gdf.to_crs(32644)
     geom_hand = unary_union([g.buffer(0) for g in hand_gdf.geometry if g is not None and not g.is_empty])

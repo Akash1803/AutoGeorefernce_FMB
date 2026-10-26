@@ -12,13 +12,15 @@ def test_village_directories_point_at_the_project():
 def test_sheet_and_output_paths():
     assert paths.sheet_path("35_04_077", "47B").name == "47B_parcels.geojson"
     assert paths.points_path("35_04_077", "47B").name == "47B_parcels.geojson.points"
-    assert paths.output_path("35_04_077", "47B").name == "47B_parcels_modified.gpkg"
+    assert paths.output_path("35_04_077", "47B").name == "47B_parcels_auto.gpkg"
+    assert paths.output_path("35_04_077", "47B").parent.name == "_auto"   # the tool's own folder
 
 
-def test_manual_files_are_newest_first():
+def test_manual_files_put_the_file_qgis_shows_first():
     files = paths.manual_files("35_04_077", "47A")
     assert [f.name for f in files][:1] == ["47A_parcels_modified2.gpkg"]
-    assert len(files) == 3
+    # 24 Sep clean-up: one file per survey; older variants live in _recovery_20260924/archive
+    assert len(files) == 1
 
 
 def test_surveys_sort_numerically_then_by_letter():

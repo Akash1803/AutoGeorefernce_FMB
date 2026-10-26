@@ -17,6 +17,14 @@ from . import paths
 
 MIN_AREA = 0.02          # square metres: smaller than this is numerical noise
 GUARD_FRACTION = 0.25    # refuse any edit that takes more than this share of a polygon
+THIN_STRIP_M = 1.0       # metres: an overlap this thin (mean width) is a boundary disagreement, and is
+                         # clipped even from a small plot; 51's 18 m2 plot 2 kept a 0.5 m x 10 m
+                         # overlap on 582 because the strip was a quarter of the plot (2026-09-21)
+
+
+def _thin(geom, max_width=THIN_STRIP_M):
+    """True for a sliver whose mean width (2 * area / perimeter) is under `max_width`."""
+    return geom.length > 0 and 2.0 * geom.area / geom.length < max_width
 
 
 MITRE = dict(join_style=2, mitre_limit=5.0)
@@ -88,8 +96,13 @@ def check(geoms):
             "union_parts": len(parts)}
 
 
-def fix(geoms, movable, rail, gap_tol=1.20):
-    """Clip overlaps and fill gaps between `movable` parcels. Returns (geoms, report)."""
+def fix(geoms, movable, rail, gap_tol=1.20, max_fill_m2=None):
+    """Clip overlaps and fill gaps between `movable` parcels. Returns (geoms, report).
+
+    `max_fill_m2` caps what counts as a gap: in a fabric that is only a corridor strip, the
+    union encloses real land whose parcels are simply not in the buffer, and without the cap
+    that land is "filled" into whichever parcel borders it most (569B took 10 ha, 2026-09-23).
+    """
     out = {k: g.buffer(0) for k, g in geoms.items()}
     report = {"clips": [], "fills": [], "refused": [], "rail_conflicts": []}
     keys = sorted(out, key=paths.survey_sort_key)
@@ -161,6 +174,8 @@ def fix(geoms, movable, rail, gap_tol=1.20):
                 continue
             candidates.append((piece, "gap between %s and %s" % (a, b)))
     for gap, kind in candidates:
+        if max_fill_m2 is not None and gap.area > max_fill_m2:
+            continue                      # not a sliver: land the buffer simply does not hold
         best, best_share = None, 0.0
         for key in movable:
             share = out[key].buffer(0.05).intersection(gap).area
@@ -556,7 +571,8 @@ def resolve(parts_by_survey, settled, order, rail=(), anchors=None, tol=CONFORM_
                 new.append((props, g, note))
                 continue
             ng = _largest(g.difference(bodies[against]))
-            if ng is None or ng.is_empty or ng.geom_type != "Polygon" or inter.area / g.area > GUARD_FRACTION:
+            too_much = inter.area / g.area > GUARD_FRACTION and not _thin(inter)
+            if ng is None or ng.is_empty or ng.geom_type != "Polygon" or too_much:
                 report["refused"].append([s, props.get("poly_id"), why, round(inter.area, 2)])
                 new.append((props, g, note))
                 continue
@@ -626,6 +642,121 @@ def resolve(parts_by_survey, settled, order, rail=(), anchors=None, tol=CONFORM_
             bodies[s] = _body_of([g2 for _p, g2, _n in out[s]])
             report["fills"].append([round(hole.area, 2), "into", s, props.get("poly_id")])
     return out, report
+
+
+MAX_LOSS = 0.05                 # a parcel that lost more than this of its rigid area was mis-placed
+SPIKE_DEG = 10.0
+SPIKE_ARM_M = 2.0
+SIBLING_OVERLAP_M2 = 0.5
+
+
+def _spiky(geom):
+    ring = list(geom.exterior.coords)
+    n = len(ring) - 1
+    for i in range(n):
+        a, b, c = ring[i - 1], ring[i], ring[(i + 1) % n]
+        v1 = (a[0] - b[0], a[1] - b[1])
+        v2 = (c[0] - b[0], c[1] - b[1])
+        l1, l2 = math.hypot(*v1), math.hypot(*v2)
+        if min(l1, l2) < SPIKE_ARM_M:
+            continue
+        ang = math.degrees(math.acos(max(-1.0, min(1.0, (v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2)))))
+        if ang < SPIKE_DEG:
+            return True
+    return False
+
+
+def conform_as_body(survey, rigid_parts, settled, anchors=(), tol=CONFORM_TOL, anchor_tol=ANCHOR_CONFORM_TOL):
+    """Conform one survey as a single body, then carry the new outline down to its plots.
+
+    Used when plot-by-plot conform pulled a survey's plots apart. The dissolved outline is
+    conformed against `settled` (anchors and earlier outputs), each plot is clipped to it and
+    every filled piece goes to the plot bordering it most. Returns (parts, note) or (None, why).
+    """
+    body = unary_union([g for _p, g in rigid_parts])
+    if body.is_empty or body.geom_type != "Polygon":
+        return None, "body not a single polygon"
+    out, rep = conform({survey: [({"poly_id": 0, "plot_no": survey}, body)]}, settled, [survey],
+                       anchors=set(anchors), tol=tol, anchor_tol=anchor_tol)
+    new_body = out.get(survey, [(None, None, None)])[0][1]
+    if new_body is None or new_body.is_empty or new_body.geom_type != "Polygon" or not new_body.is_valid:
+        return None, "body conform failed"
+    for s, g in settled.items():
+        if new_body.intersection(g).area > SIBLING_OVERLAP_M2:
+            return None, "body conform overlaps %s" % s
+    parts = apply_to_parts(rigid_parts, new_body, body)
+    moved = rep.get("conformed", {}).get(survey, {}).get("max_move_m", 0.0)
+    return [(p, g, ("body-conformed," + n).strip(",")) for p, g, n in parts], "conformed as one body, max %.2f m" % moved
+
+
+def sanity(rigid_parts, new_parts, max_loss=MAX_LOSS):
+    """Guard the resolved plots of one survey before they are written.
+
+    Returns (parts, notes). A plot that came out invalid, spiky (a corner under SPIKE_DEG with
+    arms over SPIKE_ARM_M) or overlapping a sibling plot is replaced by its rigid geometry clipped
+    to the resolved body ("rigid-clipped"). If the survey lost more than `max_loss` of its rigid
+    area to clipping, the note "topology cut N %" is added: the placement, not the topology, is
+    at fault, and the caller marks the parcel red. 51 lost 36 % and 50A 7 % on 2026-09-21 and
+    were delivered with sliver plots.
+    """
+    rigid = {i: g for i, (_p, g) in enumerate(rigid_parts)}
+    body_rigid = unary_union([g for _p, g in rigid_parts])
+    body_new = unary_union([g.buffer(0) for _p, g, _n in new_parts if g is not None and not g.is_empty])
+    notes = []
+    loss = (body_rigid.area - body_new.area) / body_rigid.area if body_rigid.area else 0.0
+    if loss > max_loss:
+        notes.append("topology cut %.0f %%" % (100 * loss))
+    if body_new.geom_type != "Polygon" and body_rigid.geom_type == "Polygon":
+        # the plots came apart (one conformed, one refused): the sheet is one piece, keep it so
+        return [(props, rigid[i], "rigid (plots came apart)") for i, (props, _g, _n) in enumerate(new_parts)], \
+            notes + ["plots came apart, survey kept rigid"]
+    parts = list(new_parts)
+    bad = set()
+    for i, (_p, g, _n) in enumerate(parts):
+        if g is None or g.is_empty or g.geom_type != "Polygon" or not g.is_valid:
+            bad.add(i)
+        elif _spiky(g) and not (i in rigid and _spiky(rigid[i])):
+            bad.add(i)                          # a wedge the sheet itself draws (47A plot 3) is not a fault
+    for i in range(len(parts)):
+        for j in range(i + 1, len(parts)):
+            gi, gj = parts[i][1], parts[j][1]
+            if gi is not None and gj is not None and gi.intersection(gj).area > SIBLING_OVERLAP_M2:
+                bad.add(i if gi.area < gj.area else j)
+    good = [parts[j][1] for j in range(len(parts)) if j not in bad and parts[j][1] is not None and not parts[j][1].is_empty]
+    for i in sorted(bad):
+        props, _g, note = parts[i]
+        # first choice: the space the sound siblings leave inside the resolved outline, which keeps
+        # the survey in one piece; otherwise the rigid plot clipped to the outline
+        # the siblings are shrunk by a millimetre so the repaired plot overlaps them by a hair and
+        # the survey unions to one piece; exact differences leave sub-centimetre slits (51, 2026-09-21)
+        remainder = _largest(body_new.difference(unary_union(good).buffer(-0.001))) if good else None
+        fallback = None
+        if (remainder is not None and not remainder.is_empty and remainder.geom_type == "Polygon" and remainder.is_valid
+                and not remainder.interiors and i in rigid
+                and 0.5 * rigid[i].area <= remainder.area <= 1.25 * rigid[i].area
+                and remainder.intersection(rigid[i]).area >= 0.5 * remainder.area
+                and (not _spiky(remainder) or _spiky(rigid[i]))):
+            fallback = remainder
+        if fallback is None:
+            fallback = _largest(rigid[i].intersection(body_new)) if i in rigid else None
+        if fallback is None or fallback.is_empty or fallback.geom_type != "Polygon":
+            fallback = rigid.get(i, _g)
+        parts[i] = (props, fallback, (note + ",rigid-clipped").strip(","))
+        good.append(fallback)
+    for i in sorted(bad):
+        # a fallback plot must not sit on a sibling that received a filled piece: trim it
+        props, g, note = parts[i]
+        for j, (_pj, gj, _nj) in enumerate(parts):
+            if j == i or gj is None or gj.is_empty or g is None:
+                continue
+            if g.intersection(gj).area > 0.05:
+                trimmed = _largest(g.difference(gj.buffer(-0.001)))
+                if trimmed is not None and not trimmed.is_empty and trimmed.geom_type == "Polygon":
+                    g = trimmed
+        parts[i] = (props, g, note)
+    if bad:
+        notes.append("%d plot(s) rigid-clipped" % len(bad))
+    return parts, notes
 
 
 def report_rail_conflicts(village, report):

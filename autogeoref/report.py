@@ -49,8 +49,11 @@ def _q(values: List[float], q: float) -> Optional[float]:
 
 
 def metrics(rows: Iterable[Dict[str, object]], acceptance_m: float = 3.0) -> Dict[str, object]:
-    """Counts and rates for one set of rows; rule-based colour against the label."""
-    rows = list(rows)
+    """Counts and rates for one set of rows; rule-based colour against the label.
+
+    Sheet-QC failure rows carry a reason and no label and are left out of every figure here.
+    """
+    rows = [r for r in rows if not evalrows.is_qc_failure(r)]
     lab = [r for r in rows if evalrows.is_labelled(r)]
     within = [r for r in lab if str(r.get("within_3m")) == "1"]
     green = [r for r in lab if r.get("colour") == "green"]
@@ -65,7 +68,20 @@ def metrics(rows: Iterable[Dict[str, object]], acceptance_m: float = 3.0) -> Dic
         "recall_green_amber_pct": _pct(len(green_amber_within), len(within)),
         "err_fmb_median_m": _q(err_fmb, 0.5), "err_fmb_p90_m": _q(err_fmb, 0.9),
         "err_hand_median_m": _q(err_hand, 0.5), "err_hand_p90_m": _q(err_hand, 0.9),
+        **{k: v for k, v in evalrows.distinct_summary(rows).items() if k.startswith(("distinct", "parcels"))},
     }
+
+
+PR3_MIN_PARCELS = 300
+PR3_MIN_VILLAGES = 2
+
+
+def pr3_gate(rows: List[Dict[str, object]], min_parcels: int = PR3_MIN_PARCELS, min_villages: int = PR3_MIN_VILLAGES) -> Dict[str, object]:
+    """The PR 3 gate counts distinct labelled parcels across villages, never rows."""
+    current = [r for r in rows if str(r.get("backfilled", "0")) in ("", "0")]
+    d = evalrows.distinct_summary(current)
+    ok = d["distinct_labelled"] >= min_parcels and len(d["villages"]) >= min_villages
+    return dict(d, ok=ok, min_parcels=min_parcels, min_villages=min_villages)
 
 
 def comparison_table(rows: List[Dict[str, object]], acceptance_m: float = 3.0) -> List[Dict[str, object]]:
@@ -99,6 +115,7 @@ def worst10(rows: List[Dict[str, object]], include_backfilled: bool = False) -> 
     """The ten largest errors against the FMB-exact reference, current code only unless asked."""
     if not include_backfilled:
         rows = [r for r in rows if str(r.get("backfilled", "0")) in ("", "0")]
+    rows = [r for r in rows if not evalrows.is_qc_failure(r)]
     scored = [(r, _f(r.get("err_fmb_m"))) for r in rows]
     scored = [(r, e) for r, e in scored if e is not None]
     scored.sort(key=lambda re: -re[1])
@@ -121,9 +138,12 @@ def write_report(rows: List[Dict[str, object]], out_path: Path, run_label: str,
     """Markdown report with the boilerplate first, then the table, then the worst ten."""
     table = comparison_table(rows, acceptance_m)
     worst = worst10(rows)
-    cols = ["village", "row_set", "method", "rows", "labelled", "within_pct", "green", "green_within_pct",
+    cols = ["village", "row_set", "method", "rows", "labelled", "distinct_parcels", "distinct_labelled",
+            "parcels_within", "parcels_beyond", "within_pct", "green", "green_within_pct",
             "recall_green_amber_pct", "red", "red_beyond_pct", "err_fmb_median_m", "err_fmb_p90_m",
             "err_hand_median_m", "err_hand_p90_m"]
+    gate = pr3_gate(rows)
+    qc_rows = [r for r in rows if evalrows.is_qc_failure(r)]
     wcols = ["village", "survey", "run_id", "err_fmb_m", "err_hand_m", "colour", "stretched", "cause"]
     text = ["# Evaluation report: %s" % run_label,
             "", datetime.datetime.now().isoformat(timespec="seconds"), "",
@@ -132,6 +152,13 @@ def write_report(rows: List[Dict[str, object]], out_path: Path, run_label: str,
             "", "## Comparison", "", _md_table(table, cols),
             "Percentages: `within_pct` labelled rows within acceptance; `green_within_pct` share of green rows within; "
             "`recall_green_amber_pct` share of within-acceptance rows ranked green or amber; `red_beyond_pct` share of red rows beyond.",
+            "", "## Labelled parcels and the PR 3 gate", "",
+            "Distinct labelled parcels (latest row per parcel): %d, of which %d within and %d beyond acceptance, "
+            "across %d village(s): %s. Rows are not the gate; parcels are. Gate (%d parcels, %d villages): %s."
+            % (gate["distinct_labelled"], gate["parcels_within"], gate["parcels_beyond"], len(gate["villages"]),
+               ", ".join(gate["villages"]) or "-", gate["min_parcels"], gate["min_villages"], "MET" if gate["ok"] else "not met"),
+            "", "Sheet-QC failures logged with a reason and no label, excluded from every figure above: %d (%s)."
+            % (len(qc_rows), ", ".join("%s %s: %s" % (r.get("village"), r.get("survey"), r.get("sheet_qc_reason")) for r in qc_rows) or "none"),
             "", "## Worst 10 by error against the FMB-exact reference", "", _md_table(worst, wcols)]
     if extra:
         text += ["", extra]

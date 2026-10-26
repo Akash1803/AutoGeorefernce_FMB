@@ -10,7 +10,7 @@ import numpy as np
 from shapely.geometry import Point, shape
 from shapely.ops import unary_union
 
-from . import fit, paths, sheets
+from . import fit, paths, sheets, visible
 
 POINTS_HEADER = "mapX,mapY,sourceX,sourceY,enable,dX,dY,residual"
 POSE_RMS_LIMIT = 3.0        # above this the .points fit is not trusted; use the geometry instead
@@ -96,7 +96,7 @@ def pose_from_geometry(village, survey, gpkg_path):
     import geopandas as gpd
     from shapely import affinity
 
-    hand = gpd.read_file(gpkg_path)
+    hand = visible.read_hand(gpkg_path)
     if hand.crs is not None and hand.crs.to_epsg() != 32644:
         hand = hand.to_crs(32644)
     sheet = {int(p.get("poly_id", i)): g for i, (p, g) in enumerate(sheets.load_sheet(village, survey))}
@@ -142,7 +142,14 @@ def pose_from_geometry(village, survey, gpkg_path):
         P, Q = [], []
         for k in common:
             other = by_id[k]
-            ring = (other.geoms[0] if other.geom_type == "MultiPolygon" else other).exterior
+            if other.geom_type in ("MultiPolygon", "GeometryCollection"):
+                parts = [q for q in other.geoms if q.geom_type == "Polygon" and q.area > 0]
+                if not parts:
+                    continue            # a degenerate sliver anchors nothing
+                other = max(parts, key=lambda q: q.area)
+            if other.geom_type != "Polygon":
+                continue
+            ring = other.exterior
             mv = np.array(list(ring.coords)[:-1], float)
             for v in list(sheet[k].exterior.coords)[:-1]:
                 w = fit.transform_points([v], theta, t)[0]
@@ -165,7 +172,14 @@ def pose_from_geometry(village, survey, gpkg_path):
     res = []
     for k in common:
         other = by_id[k]
-        boundary = (other.geoms[0] if other.geom_type == "MultiPolygon" else other).exterior
+        if other.geom_type in ("MultiPolygon", "GeometryCollection"):
+            parts = [q for q in other.geoms if q.geom_type == "Polygon" and q.area > 0]
+            if not parts:
+                continue            # a degenerate sliver describes nothing
+            other = max(parts, key=lambda q: q.area)
+        if other.geom_type != "Polygon":
+            continue
+        boundary = other.exterior
         for v in list(sheet[k].exterior.coords)[:-1]:
             w = fit.transform_points([v], theta, t)[0]
             res.append(boundary.distance(Point(w)))
@@ -175,12 +189,13 @@ def pose_from_geometry(village, survey, gpkg_path):
 
 def load_anchors(village, tool_written):
     """One Anchor per survey that has a manual file the tool did not write."""
+    from . import visible
     out = {}
     for survey in paths.surveys_with_sheets(village):
-        for f in paths.manual_files(village, survey):       # newest first
+        for f in paths.manual_files(village, survey):       # the file his project shows first
             fp = fingerprint(f)
-            if fp in tool_written:
-                continue
+            if fp in tool_written and not visible.is_shown(f):
+                continue                                    # an approved parcel is his, whoever drew it
             pose = pose_from_points(village, survey)
             source = "points"
             if pose is None or pose[2] > POSE_RMS_LIMIT:
@@ -201,7 +216,7 @@ def _area_scale(village, survey, gpkg_path):
     """sqrt(hand area / sheet area): 1.00 means the hand placement kept the FMB size."""
     import geopandas as gpd
     try:
-        hand = gpd.read_file(gpkg_path)
+        hand = visible.read_hand(gpkg_path)
     except Exception:
         return float("nan")
     if hand.crs is not None and hand.crs.to_epsg() != 32644:

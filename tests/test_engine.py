@@ -49,11 +49,10 @@ def test_write_parcels_keeps_fmb_dimensions_exactly(tmp_path):
     assert float(edges["length_m"].max()) > 1.0
 
 
-def test_run_on_a_village_where_every_parcel_is_an_anchor_changes_nothing():
+def test_run_on_a_village_where_every_parcel_is_an_anchor_changes_nothing(village_copy):
     """Kizhikaranai is fully hand placed: the engine must place nothing and touch no manual file."""
     from autogeoref import paths
-    if not paths.vector_dir("35_04_077").exists():
-        pytest.skip("village not present")
+    village_copy("35_04_077")
     before = {p.name: (p.stat().st_mtime, p.stat().st_size)
               for p in paths.vector_dir("35_04_077").glob("*_parcels_modified*.gpkg")}
     out = engine.run("35_04_077", do_raster=False, do_topology=False, do_review=False)

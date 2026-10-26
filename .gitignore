@@ -11,3 +11,5 @@ autogeoref/scratch_2026-09-17/spike_gcp/*.png
 # project data lives under D:\Projects, never in the repo
 *.gpkg
 *.pdf
+# caches under the project (imagery windows, sheet renders): deletable
+_cache/

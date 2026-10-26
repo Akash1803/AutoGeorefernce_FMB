@@ -91,6 +91,9 @@ class FeatureRow:
     # label
     within_3m: Optional[int]
     notes: str
+    # sheet QC (2026-09-21): a sheet the converter got wrong is logged with the reason, no label,
+    # and stays out of every tool-error statistic
+    sheet_qc_reason: str = ""
 
     def as_dict(self) -> Dict[str, object]:
         return {f.name: ("" if getattr(self, f.name) is None else getattr(self, f.name)) for f in fields(self)}
@@ -247,17 +250,87 @@ def rows_path(path: Optional[Path] = None) -> Path:
     return Path(path) if path else paths.logs_dir() / "eval" / ROWS_FILE
 
 
+def migrate_rows(path: Optional[Path] = None) -> int:
+    """Rewrite the rows file under the current FIELDS (new columns empty). Returns rows kept."""
+    p = rows_path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return 0
+    with p.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        header = list(reader.fieldnames or [])
+        rows = list(reader)
+    if header == FIELDS:
+        return len(rows)
+    with p.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=FIELDS, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in FIELDS})
+    log.info("rows file migrated to %d columns (%d rows)", len(FIELDS), len(rows))
+    return len(rows)
+
+
 def append_rows(rows: Iterable[FeatureRow], path: Optional[Path] = None) -> Path:
+    """Append rows; a (run_id, village, survey) already in the file is never written twice."""
     p = rows_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    new = not p.exists() or p.stat().st_size == 0
+    migrate_rows(p)
+    existing = load_rows(p) if p.exists() and p.stat().st_size else []
+    seen = {(r.get("run_id"), r.get("village"), r.get("survey")) for r in existing}
+    fresh = []
+    for r in rows:
+        key = (r.run_id, r.village, r.survey)
+        if key in seen:
+            continue
+        seen.add(key)
+        fresh.append(r)
     with p.open("a", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=FIELDS)
-        if new:
+        if not existing:
             w.writeheader()
-        for r in rows:
+        for r in fresh:
             w.writerow(r.as_dict())
+    if len(fresh) != len(list(rows)):
+        log.info("%d row(s) skipped as duplicates of an existing run_id", len(list(rows)) - len(fresh))
     return p
+
+
+def qc_failure_row(village: str, survey: str, reason: str, run_id: str, run_at: Optional[str] = None,
+                   tool_git_sha: Optional[str] = None) -> FeatureRow:
+    """A row for a sheet the converter got wrong: the reason, no features, no label."""
+    run_at = run_at or datetime.datetime.now().isoformat(timespec="seconds")
+    values = {f.name: None for f in fields(FeatureRow)}
+    values.update(run_id=run_id, run_at=run_at, tool_git_sha=(git_sha() if tool_git_sha is None else tool_git_sha),
+                  village=village, survey=str(survey), mode="sheet_qc", seeds="", imagery_source="", window_sha256="",
+                  backfilled=0, method="", colour="", ref_source="none", stretch_band="", stretched_reason="",
+                  disputed_reason="", notes="sheet QC failure: " + reason, sheet_qc_reason=reason)
+    return FeatureRow(**values)
+
+
+def is_qc_failure(row: Dict[str, object]) -> bool:
+    return bool(row.get("sheet_qc_reason"))
+
+
+def distinct_summary(rows: Iterable[Dict[str, object]]) -> Dict[str, object]:
+    """Distinct parcels behind the rows: the PR 3 gate counts parcels, not rows.
+
+    Per class, a parcel is counted by the label of its latest row (run_at), so a parcel placed
+    well in one run and badly in another is one parcel in one class.
+    """
+    rows = [r for r in rows if not is_qc_failure(r)]
+    parcels = {(str(r.get("village")), str(r.get("survey"))) for r in rows}
+    latest: Dict[Tuple[str, str], Dict[str, object]] = {}
+    for r in rows:
+        if not is_labelled(r):
+            continue
+        key = (str(r.get("village")), str(r.get("survey")))
+        if key not in latest or str(r.get("run_at")) > str(latest[key].get("run_at")):
+            latest[key] = r
+    within = sum(1 for r in latest.values() if str(r.get("within_3m")) == "1")
+    return {"rows": len(rows), "labelled_rows": sum(1 for r in rows if is_labelled(r)),
+            "distinct_parcels": len(parcels), "distinct_labelled": len(latest),
+            "parcels_within": within, "parcels_beyond": len(latest) - within,
+            "villages": sorted({k[0] for k in latest})}
 
 
 def load_rows(path: Optional[Path] = None) -> List[Dict[str, str]]:

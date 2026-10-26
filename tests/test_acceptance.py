@@ -6,9 +6,13 @@ pytestmark = pytest.mark.slow
 VILLAGE = "35_04_077"
 
 
+@pytest.fixture(autouse=True)
+def _on_a_copy(village_copy):
+    village_copy(VILLAGE)
+
+
 def _skip_if_absent():
-    if not paths.vector_dir(VILLAGE).exists():
-        pytest.skip("village not present")
+    pass
 
 
 def test_a_full_run_leaves_every_manual_file_and_points_file_byte_identical():
