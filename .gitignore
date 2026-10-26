@@ -23,3 +23,8 @@ scratch_2026*/*.geojson
 scratch_2026*/*.json
 scratch_2026*/*.csv
 scratch_2026*/*.txt
+scratch_2026*/**/*.png
+scratch_2026*/**/*.pyc
+scratch_2026*/**/*.json
+scratch_2026*/**/*.csv
+scratch_2026*/**/*.txt
