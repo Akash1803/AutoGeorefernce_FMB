@@ -17,8 +17,8 @@ Post-process the FMB_Vector outputs:
 Safe to re-run; it only rewrites derived files.
 """
 import os, sys, csv, json, glob, collections, re
-D = r"D:\Projects\Tambaram_Chengalpattu"; OUT = os.path.join(D, "FMB_Vector")
-TALUK = {"04": "Chengalpattu", "05": "Tambaram", "15": "Vandalur"}
+D = os.environ.get("FMB_PROJECT", r"D:\Projects\Tambaram_Chengalpattu"); OUT = os.path.join(D, "FMB_Vector")
+TALUK = {"04": "Chengalpattu", "05": "Tambaram", "06": "Tirukalukundram", "11": "Thiruporur", "15": "Vandalur"}
 VILL = {}
 for r in csv.DictReader(open(os.path.join(D, "FMB_Sketches", "fmb_sketch_summary.csv"), encoding="utf-8")):
     VILL[r["village_code"]] = r["village"]

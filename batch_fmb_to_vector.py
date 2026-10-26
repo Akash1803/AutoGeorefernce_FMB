@@ -20,17 +20,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fmb_to_geojson as F
 import scale_from_dimensions as SD
 
-D = r"D:\Projects\Tambaram_Chengalpattu"
+# another corridor: set FMB_PROJECT (its folder) and FMB_PLOTS_GPKG (its buffer plots GeoPackage, same layer schema)
+D = os.environ.get("FMB_PROJECT", r"D:\Projects\Tambaram_Chengalpattu")
+PLOTS_GPKG = os.environ.get("FMB_PLOTS_GPKG", "Railway_Buffer_Vector_Plots.gpkg")
 SK = os.path.join(D, "FMB_Sketches"); OUT = os.path.join(D, "FMB_Vector")
 GLYPHS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "glyphlib.json")
 LIB = [(c, tuple(b), x) for c, b, x in json.load(open(GLYPHS))]
-TALUK = {"04": "Chengalpattu", "05": "Tambaram", "15": "Vandalur"}
+TALUK = {"04": "Chengalpattu", "05": "Tambaram", "06": "Tirukalukundram", "11": "Thiruporur", "15": "Vandalur"}
 
 
 def survey_areas():
     """(village_code, survey_no) -> total plot area (m2) from the village vector layers."""
     import sqlite3, re
-    con = sqlite3.connect(os.path.join(D, "Railway_Buffer_Vector_Plots.gpkg"))
+    con = sqlite3.connect(os.path.join(D, PLOTS_GPKG))
     out = collections.defaultdict(float); names = {}
     for code, s, a, v in con.execute("select village_code, survey_no, plot_area_sqm, village from vector_in_buffer_30m"):
         m = re.match(r"^\d+", s.strip())
